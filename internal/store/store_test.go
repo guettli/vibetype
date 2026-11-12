@@ -77,3 +77,20 @@ func TestSessionLimitAndExpiry(t *testing.T) {
 		t.Fatalf("expired sessions: %d %v", n, err)
 	}
 }
+
+func TestUpsertOnDeletedText(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+	u := User{ID: NewID(), DisplayName: "u"}
+	if err := st.CreateUserWithPasskey(ctx, u, Passkey{ID: "pk", PublicKey: []byte{1}, Credential: []byte("{}")}); err != nil {
+		t.Fatal(err)
+	}
+	// the handler looked the text up, then it was deleted before the upsert
+	if _, err := st.UpsertTypingSession(ctx, TypingSession{ID: "s", TextID: "gone00", UserID: u.ID, StartedAt: time.Now()}, 0); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("want ErrNotFound, got %v", err)
+	}
+}

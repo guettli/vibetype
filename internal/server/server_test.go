@@ -256,3 +256,59 @@ func TestHardening(t *testing.T) {
 		t.Errorf("session limit: %d", c)
 	}
 }
+
+func TestResultsAndDelete(t *testing.T) {
+	e := newEnv(t)
+	_, aTok := e.login("Alice")
+	_, bTok := e.login("Bob")
+	var t1, t2 store.Text
+	e.do(aTok, "POST", "/api/texts", map[string]string{"title": "Eins", "content": "abc"}, &t1)
+	e.do(aTok, "POST", "/api/texts", map[string]string{"title": "Zwei", "content": "äöü ß"}, &t2)
+	start := time.Now().UTC().Add(-time.Minute)
+	fin := time.Now().UTC()
+	for i, tt := range []store.Text{t1, t2, t1} {
+		if c := e.do(bTok, "PUT", fmt.Sprintf("/api/sessions/session-%d", i), map[string]any{
+			"text_id": tt.ID, "cursor_pos": 3, "error_count": i, "cpm": 100 + i, "started_at": start.Add(time.Duration(i) * time.Second),
+			"finished_at": map[bool]any{true: fin, false: nil}[tt.ID == t1.ID]}, nil); c != 200 {
+			t.Fatalf("sync %d: %d", i, c)
+		}
+	}
+	var res struct {
+		Results []store.Result `json:"results"`
+		BestIDs []string       `json:"best_ids"`
+	}
+	if c := e.do(bTok, "GET", "/api/me/results", nil, &res); c != 200 || len(res.Results) != 3 {
+		t.Fatalf("results: %d %+v", c, res)
+	}
+	if r := res.Results[0]; r.ID != "session-2" || r.TextTitle != "Eins" || r.TextLength != 3 || r.FinishedAt == nil {
+		t.Fatalf("newest result: %+v", r)
+	}
+	if r := res.Results[1]; r.TextTitle != "Zwei" || r.TextLength != 5 || r.FinishedAt != nil {
+		t.Fatalf("utf-8 length / unfinished: %+v", r)
+	}
+	if len(res.BestIDs) != 1 || res.BestIDs[0] != "session-2" { // finished on t1 with the higher cpm
+		t.Fatalf("best ids: %v", res.BestIDs)
+	}
+	if c := e.do(bTok, "GET", "/api/me/results?text_id="+t1.ID, nil, &res); c != 200 || len(res.Results) != 2 {
+		t.Fatalf("filtered: %d %d", c, len(res.Results))
+	}
+	if c := e.do(aTok, "GET", "/api/me/results", nil, &res); c != 200 || len(res.Results) != 0 {
+		t.Fatalf("alice has no results: %d %d", c, len(res.Results))
+	}
+
+	if c := e.do(bTok, "DELETE", "/api/texts/"+t1.ID, nil, nil); c != 403 {
+		t.Fatalf("bob deletes alice's text: %d", c)
+	}
+	if c := e.do(aTok, "DELETE", "/api/texts/"+t1.ID, nil, nil); c != 204 {
+		t.Fatalf("delete: %d", c)
+	}
+	if c := e.do(aTok, "DELETE", "/api/texts/"+t1.ID, nil, nil); c != 404 {
+		t.Fatalf("delete twice: %d", c)
+	}
+	if c := e.do(bTok, "GET", "/api/me/results", nil, &res); c != 200 || len(res.Results) != 1 {
+		t.Fatalf("sessions of deleted text must be gone: %d %d", c, len(res.Results))
+	}
+	if c := e.do(bTok, "PUT", "/api/sessions/session-0", map[string]any{"text_id": t1.ID, "cursor_pos": 1, "error_count": 0, "cpm": 1, "started_at": start}, nil); c != 404 {
+		t.Fatalf("sync to deleted text: %d", c)
+	}
+}

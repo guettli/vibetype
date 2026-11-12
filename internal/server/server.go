@@ -30,6 +30,7 @@ const (
 	maxContentLen = 20000
 	maxNameLen    = 64
 
+	maxResults           = 200
 	maxCPM               = 3000 // world records are around 1000-1300 cpm
 	maxSessionsPerText   = 50   // per user and text
 	maxPendingCeremonies = 10000
@@ -114,6 +115,8 @@ func (s *Server) routes() {
 	m.HandleFunc("POST /api/texts", s.auth(s.createText))
 	m.HandleFunc("GET /api/texts/{id}", s.auth(s.getText))
 	m.HandleFunc("GET /api/texts/{id}/sessions", s.auth(s.liveSessions))
+	m.HandleFunc("DELETE /api/texts/{id}", s.auth(s.deleteText))
+	m.HandleFunc("GET /api/me/results", s.auth(s.myResults))
 	m.HandleFunc("PUT /api/sessions/{id}", s.auth(s.syncSession))
 
 	static := http.FileServerFS(s.cfg.Static)
@@ -339,6 +342,10 @@ func (s *Server) syncSession(w http.ResponseWriter, r *http.Request) {
 		CursorPos: in.CursorPos, ErrorCount: in.ErrorCount, CPM: in.CPM,
 		StartedAt: in.StartedAt.UTC(), FinishedAt: utcPtr(in.FinishedAt),
 	}, maxSessionsPerText)
+	if errors.Is(err, store.ErrNotFound) { // deleted concurrently
+		httpError(w, http.StatusNotFound, "text not found")
+		return
+	}
 	if errors.Is(err, store.ErrLimit) {
 		httpError(w, http.StatusTooManyRequests, fmt.Sprintf("more than %d typing sessions on this text", maxSessionsPerText))
 		return
@@ -381,4 +388,35 @@ func (s *Server) RunJanitor(ctx context.Context, every time.Duration) {
 		case <-t.C:
 		}
 	}
+}
+
+// deleteText removes one of the caller's texts including all typing sessions on it.
+func (s *Server) deleteText(w http.ResponseWriter, r *http.Request) {
+	err := s.cfg.Store.DeleteText(r.Context(), r.PathValue("id"), userFrom(r.Context()).ID)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		httpError(w, http.StatusNotFound, "text not found")
+	case errors.Is(err, store.ErrForbidden):
+		httpError(w, http.StatusForbidden, "only the creator can delete a text")
+	case err != nil:
+		s.internal(w, r, err)
+	default:
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+// myResults lists the caller's typing sessions (newest first), optionally for one text.
+func (s *Server) myResults(w http.ResponseWriter, r *http.Request) {
+	uid := userFrom(r.Context()).ID
+	results, err := s.cfg.Store.ResultsForUser(r.Context(), uid, r.URL.Query().Get("text_id"), maxResults)
+	if err != nil {
+		s.internal(w, r, err)
+		return
+	}
+	best, err := s.cfg.Store.BestResultIDs(r.Context(), uid)
+	if err != nil {
+		s.internal(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"results": results, "best_ids": best, "limit": maxResults})
 }

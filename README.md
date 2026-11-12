@@ -17,6 +17,15 @@ jeder Nutzer kann Texte anlegen, per Link/Code teilen und sieht live, wer seinen
   Großschreibung folgt der 10-Finger-Regel: Shift drückt der kleine Finger der jeweils anderen Hand. Bei QWERTZ werden
   Tottasten in zwei Schritten erklärt: `^` allein ist „^, dann Leertaste“, `é` ist „´, dann e“. Zeichen, die auf dem
   Layout fehlen (z. B. ñ), zeigen „Taste nicht auf diesem Layout“.
+* **Eigene Ergebnisse:** Die Startseite listet die letzten 200 eigenen Tipp-Durchgänge, auch nicht beendete (Datum,
+  Text, Fortschritt, Anschläge/min, Fehler, Genauigkeit, Zeit). Die Bestleistung pro Text (beendet, höchste
+  Anschläge/min) ist mit ★ markiert. Der Server berechnet sie über alle Durchgänge, nicht nur über die angezeigten.
+  Nach dem Abschluss eines Texts zeigt eine Zusammenfassung das Ergebnis und vergleicht es mit der bisherigen
+  Bestleistung. Dafür zählen die Durchgänge auf dem Server und die lokale Historie dieses Browsers, also auch noch
+  nicht synchronisierte oder offline beendete Durchgänge.
+* **Texte löschen:** Der Ersteller kann einen Text löschen. Dabei werden auch alle Tipp-Sitzungen aller Personen auf
+  diesem Text gelöscht (mit Rückfrage). Wer den Text noch offline im Browser hat, bekommt beim nächsten Sync den
+  Hinweis, dass der Text gelöscht wurde. Seine lokalen Daten zu diesem Text werden dann verworfen.
 * **Passkeys:** Login per WebAuthn (discoverable credentials), ohne Passwort und ohne E-Mail. Sitzung per HTTP-only-Cookie.
 
 ## Stack
@@ -104,6 +113,9 @@ verwechselbare Zeichen (kein 0/o, 1/l/i).
 * Der Server prüft: Sitzung gehört dem Nutzer und dem Text, `cursor_pos ≤ Textlänge`, `cpm ≤ 3000`, `started_at`
   liegt nicht in der Zukunft, `finished_at` nur am Textende und nach `started_at`, höchstens 50 Sitzungen pro Nutzer
   und Text (sonst 429).
+* Ein 404 beim Sync bedeutet, dass der Text gelöscht wurde. Die App verwirft dann alle lokalen Daten zu diesem Text und
+  sagt das dem Nutzer. Löscht jemand den Text, während ein Sync läuft, prüft der Server das innerhalb der Transaktion
+  und antwortet ebenfalls mit 404.
 * Fehlerverhalten: Netzwerkfehler sowie 502/503/504 vom Reverse-Proxy (Backend startet neu) → „offline“, erneuter
   Versuch. 401 → Hinweis „neu anmelden“, Stand bleibt erhalten. Andere 5xx und 429 → Fehlermeldung, erneuter Versuch.
   Andere 4xx → Fehlermeldung, der Stand wird verworfen (ein erneuter Versuch kann nicht helfen).
@@ -138,4 +150,6 @@ letzten 60 s.
 | GET/POST | `/api/texts` | eigene Texte / neuen Text anlegen |
 | GET | `/api/texts/{id}` | jeder angemeldete Nutzer (Teilen per Link) |
 | GET | `/api/texts/{id}/sessions` | Live-Ansicht, nur für den Ersteller |
+| DELETE | `/api/texts/{id}` | nur der Ersteller; löscht auch alle Sitzungen auf dem Text |
+| GET | `/api/me/results[?text_id=…]` | eigene Sitzungen mit Texttitel und -länge, neueste zuerst (max. 200), dazu `best_ids` (Bestleistung pro Text über alle Sitzungen) |
 | PUT | `/api/sessions/{id}` | Sync |

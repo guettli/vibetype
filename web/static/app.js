@@ -36,7 +36,13 @@ function clearUserStorage(userId) {
   for (const k of Object.keys(localStorage)) if (k.startsWith(prefix)) localStorage.removeItem(k);
 }
 
-// ---------- tiny DOM helper ----------
+// ---------- tiny DOM helpers ----------
+
+// fill replaces el's children; null/false children are skipped (plain
+// replaceChildren would render them as the text "null"/"false").
+function fill(el, ...children) {
+  el.replaceChildren(...children.flat().filter((c) => c != null && c !== false));
+}
 
 function h(tag, attrs = {}, ...children) {
   const el = document.createElement(tag);
@@ -79,7 +85,7 @@ const isOffline = (err) => !(err instanceof ApiError) || [502, 503, 504].include
 const status = { sync: 'ok', error: null };
 
 function renderStatus() {
-  $status.replaceChildren();
+  fill($status);
   if (status.error) {
     $status.append(h('span', { class: 'bad' }, status.error, ' ',
       h('button', { class: 'link', onclick: () => { status.error = null; renderStatus(); } }, '×')));
@@ -98,6 +104,16 @@ function fail(msg) {
 // ---------- sync loop (client -> server) ----------
 // "pending" maps sessionId -> latest payload. Progress is latest-wins, so the queue
 // never holds more than one entry per session, even after a long offline phase.
+
+// forgetText drops everything this browser keeps about a text (it was deleted).
+function forgetText(textId) {
+  us.del('text:' + textId);
+  us.del('session:' + textId);
+  us.del('history:' + textId);
+  const pending = us.get('pending', {});
+  for (const [id, p] of Object.entries(pending)) if (p.text_id === textId) delete pending[id];
+  us.set('pending', pending);
+}
 
 function enqueue(state) {
   const pending = us.get('pending', {});
@@ -120,6 +136,12 @@ async function flush() {
         if (isOffline(err)) { status.sync = 'offline'; break; }
         if (err.status === 401) { status.sync = 'unauthorized'; break; }
         if (err.status >= 500 || err.status === 429) { fail(`Sync-Fehler auf dem Server (${err.status}): ${err.message}`); break; }
+        if (err.status === 404) {
+          const title = us.get('text:' + payload.text_id)?.title ?? payload.text_id;
+          forgetText(payload.text_id);
+          fail(`Der Text „${title}“ wurde von seinem Ersteller gelöscht. Dein Fortschritt darauf wurde verworfen.`);
+          continue;
+        }
         // Permanent rejection (4xx): report loudly and drop, retrying cannot help.
         fail(`Sync abgelehnt (${err.status}): ${err.message}`);
         rejected = true;
@@ -221,7 +243,7 @@ async function logout() {
 }
 
 function renderUser() {
-  $user.replaceChildren();
+  fill($user);
   if (!me) return;
   $user.append(me.display_name, ' · ', h('button', { class: 'link', onclick: logout }, 'abmelden'));
 }
@@ -274,7 +296,7 @@ function keyboardWidget(refocus) {
     $layout.value = prefs.layout;
     $layout.hidden = $kb.hidden = $hint.hidden = !prefs.keyboard;
     keys = {};
-    $kb.replaceChildren(...LAYOUTS[prefs.layout].rows.map((row) => h('div', { class: 'kb-row' }, row.map((key) => {
+    fill($kb, ...LAYOUTS[prefs.layout].rows.map((row) => h('div', { class: 'kb-row' }, row.map((key) => {
       const letter = !key.mod && key.shift && key.base.toUpperCase() === key.shift;
       const label = key.mod ? key.label : key.id === 'Space' ? '' : key.id === 'Enter' ? '↵' : letter ? key.shift : key.base;
       const $k = h('div', { class: `key f-${key.finger}${key.mod ? ' mod' : ''}${['f', 'j'].includes(key.id) ? ' bump' : ''}` },
@@ -334,7 +356,7 @@ async function route() {
   teardown();
   teardown = () => {};
   const m = location.pathname.match(/^\/t\/([a-z0-9]+)$/);
-  if (!me) { $app.replaceChildren(loginView()); return; }
+  if (!me) { fill($app, loginView()); return; }
   if (m) await typingView(m[1]);
   else await homeView();
 }
@@ -346,8 +368,9 @@ async function homeView() {
   const content = h('textarea', { rows: 8, placeholder: 'Text zum Abtippen …', required: true });
   const code = h('input', { type: 'text', placeholder: 'Code, z. B. a7x9k2', pattern: '[a-z0-9]+', required: true, autocapitalize: 'off' });
   const list = h('ul', { class: 'texts' }, h('li', { class: 'muted' }, 'lade …'));
+  const results = h('div', {}, h('p', { class: 'muted' }, 'lade …'));
 
-  $app.replaceChildren(
+  fill($app, 
     h('section', { class: 'card' },
       h('h2', {}, 'Text öffnen'),
       h('form', { class: 'row', onsubmit: (e) => { e.preventDefault(); navigate('/t/' + code.value.trim().toLowerCase()); } },
@@ -367,19 +390,75 @@ async function homeView() {
       }, title, content, h('button', { class: 'primary' }, 'Speichern & teilen')),
     ),
     h('section', { class: 'card' }, h('h2', {}, 'Meine Texte'), list),
+    h('section', { class: 'card' }, h('h2', {}, 'Meine Ergebnisse'), results),
   );
+  loadResults(results);
 
   try {
     const texts = await api('GET', '/api/texts');
-    list.replaceChildren(...(texts.length ? texts.map((t) => h('li', {},
+    fill(list, ...(texts.length ? texts.map((t) => h('li', {},
       h('a', { href: '/t/' + t.id, 'data-link': true }, t.title), ' ',
       h('code', {}, t.id), ' ',
-      h('span', { class: 'muted' }, `${chars(t.content).length} Zeichen`),
+      h('span', { class: 'muted' }, `${chars(t.content).length} Zeichen`), ' ',
+      h('button', {
+        class: 'link danger',
+        onclick: async () => {
+          if (!confirm(`Text „${t.title}“ und alle Ergebnisse dazu (auch die anderer Personen) endgültig löschen?`)) return;
+          try {
+            await api('DELETE', '/api/texts/' + t.id);
+            forgetText(t.id);
+            homeView();
+          } catch (err) { fail(`Löschen fehlgeschlagen: ${err.message}`); }
+        },
+      }, 'löschen'),
     )) : [h('li', { class: 'muted' }, 'Noch keine Texte.')]));
   } catch (err) {
-    list.replaceChildren(h('li', { class: isOffline(err) ? 'warn' : 'bad' },
+    fill(list, h('li', { class: isOffline(err) ? 'warn' : 'bad' },
       isOffline(err) ? 'offline – Liste nicht verfügbar' : err.message));
   }
+}
+
+// ---------- results ----------
+
+const fmtDuration = (ms) => {
+  const s = Math.round(ms / 1000);
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+};
+const fmtDate = (iso) => new Date(iso).toLocaleString('de-DE', { dateStyle: 'short', timeStyle: 'short' });
+const resultAccuracy = (r) => accuracy({ cursor: r.cursor_pos, errors: r.error_count });
+
+// bestOf returns the finished run with the highest cpm (ties: the earlier one), or null.
+function bestOf(runs) {
+  let best = null;
+  for (const r of runs) {
+    if (!r.finished_at) continue;
+    if (!best || r.cpm > best.cpm || (r.cpm === best.cpm && r.finished_at < best.finished_at)) best = r;
+  }
+  return best;
+}
+
+async function loadResults($el) {
+  let data;
+  try { data = await api('GET', '/api/me/results'); }
+  catch (err) {
+    fill($el, h('p', { class: isOffline(err) ? 'warn' : 'bad' }, isOffline(err) ? 'offline – Ergebnisse nicht verfügbar' : err.message));
+    return;
+  }
+  const { results, limit } = data;
+  if (!results.length) { fill($el, h('p', { class: 'muted' }, 'Noch keine Ergebnisse. Öffne einen Text und tippe los.')); return; }
+  const best = new Set(data.best_ids); // computed over all runs, not only the listed ones
+  fill($el, results.length >= limit ? h('p', { class: 'muted' }, `Die letzten ${limit} Durchgänge:`) : null, h('table', { class: 'results' },
+    h('thead', {}, h('tr', {}, h('th', {}, 'Datum'), h('th', {}, 'Text'), h('th', {}, 'Fortschritt'), h('th', { class: 'num' }, 'Anschl./min'),
+      h('th', { class: 'num' }, 'Fehler'), h('th', { class: 'num' }, 'Genauigkeit'), h('th', { class: 'num' }, 'Zeit'))),
+    h('tbody', {}, results.map((r) => h('tr', {},
+      h('td', {}, fmtDate(r.started_at)),
+      h('td', {}, h('a', { href: '/t/' + r.text_id, 'data-link': true }, r.text_title), best.has(r.id) ? h('span', { class: 'best', title: 'Bestleistung' }, ' ★') : null),
+      h('td', {}, r.finished_at ? 'fertig' : `${Math.floor((r.cursor_pos / r.text_length) * 100)} %`),
+      h('td', { class: 'num' }, r.cpm),
+      h('td', { class: 'num' }, r.error_count),
+      h('td', { class: 'num' }, resultAccuracy(r), ' %'),
+      h('td', { class: 'num' }, r.finished_at ? fmtDuration(Date.parse(r.finished_at) - Date.parse(r.started_at)) : '–'),
+    )))));
 }
 
 // ---------- typing view ----------
@@ -392,16 +471,17 @@ async function loadText(id) {
   } catch (err) {
     const cached = us.get('text:' + id);
     if (isOffline(err) && cached) return cached;
+    if (err.status === 404) forgetText(id);
     throw err;
   }
 }
 
 async function typingView(textId) {
-  $app.replaceChildren(h('p', { class: 'muted' }, 'lade Text …'));
+  fill($app, h('p', { class: 'muted' }, 'lade Text …'));
   let text;
   try { text = await loadText(textId); }
   catch (err) {
-    $app.replaceChildren(h('section', { class: 'card' },
+    fill($app, h('section', { class: 'card' },
       h('p', { class: 'bad' }, err.status === 404 ? `Text „${textId}" gibt es nicht.` : `Fehler: ${err.message}`),
       h('a', { href: '/', 'data-link': true }, 'zurück')));
     return;
@@ -416,6 +496,21 @@ async function typingView(textId) {
   const $rest = h('span', { class: 'rest' });
   const $typing = h('div', { class: 'typing', tabindex: 0 }, $done, $cur, $rest);
   const $stats = h('div', { class: 'stats' });
+  const $summary = h('div', { class: 'summary', hidden: true });
+  // Earlier runs of this user on this text: from the server (all devices) plus the
+  // local history (this device, includes runs not synced yet). serverRuns stays
+  // null while offline or not loaded yet.
+  const historyKey = 'history:' + textId;
+  let serverRuns = null;
+  flush() // so the server already knows about runs finished offline
+    .then(() => api('GET', '/api/me/results?text_id=' + encodeURIComponent(textId)))
+    .then(({ results }) => { serverRuns = results; renderSummary(); })
+    .catch((err) => { if (!isOffline(err)) fail(`Ergebnisse konnten nicht geladen werden: ${err.message}`); });
+  const previousBest = () => bestOf([...(serverRuns ?? []), ...us.get(historyKey, [])].filter((r) => r.id !== state.id));
+  function rememberFinished() {
+    const run = { id: state.id, cpm: cpm(state, Date.now()), cursor_pos: state.cursor, error_count: state.errors, finished_at: state.finishedAt };
+    us.set(historyKey, [...us.get(historyKey, []), run].slice(-50));
+  }
   const kb = keyboardWidget(() => { if (document.activeElement !== $typing) $typing.focus(); });
   const $live = h('div', { class: 'live' });
   const shareUrl = `${location.origin}/t/${text.id}`;
@@ -427,15 +522,31 @@ async function typingView(textId) {
     $rest.textContent = textChars.slice(state.cursor + 1).join('');
     kb.show(state.cursor < textChars.length ? textChars[state.cursor] : null);
     renderStats();
+    renderSummary();
   }
   function renderStats() {
     const pct = Math.floor((state.cursor / textChars.length) * 100);
-    $stats.replaceChildren(...[
+    fill($stats, ...[
       h('span', {}, h('b', {}, pct, ' %'), ' Fortschritt'),
       h('span', {}, h('b', {}, cpm(state, Date.now())), ' Anschläge/min'),
       h('span', {}, h('b', {}, state.errors), ' Fehler'),
       h('span', {}, h('b', {}, accuracy(state), ' %'), ' Genauigkeit'),
       state.finishedAt ? h('button', { class: 'primary', onclick: restart }, 'Nochmal') : null,
+    ].filter(Boolean));
+  }
+  function renderSummary() {
+    $summary.hidden = !state.finishedAt;
+    if (!state.finishedAt) return;
+    const myCpm = cpm(state, Date.now());
+    const best = previousBest();
+    let verdict = null;
+    if (!best) verdict = serverRuns ? h('p', {}, 'Dein erstes Ergebnis für diesen Text.') : null; // offline: unknown
+    else if (myCpm > best.cpm) verdict = h('p', { class: 'good' }, `★ Neue Bestleistung! Vorher ${best.cpm} Anschläge/min.`);
+    else verdict = h('p', {}, `Deine Bestleistung: ${best.cpm} Anschläge/min (${resultAccuracy(best)} % Genauigkeit).`);
+    fill($summary, ...[
+      h('h3', {}, 'Fertig!'),
+      h('p', {}, `${myCpm} Anschläge/min · ${accuracy(state)} % Genauigkeit · ${state.errors} Fehler · Zeit ${fmtDuration(Date.parse(state.finishedAt) - Date.parse(state.startedAt))}`),
+      verdict,
     ].filter(Boolean));
   }
   function restart() {
@@ -458,6 +569,7 @@ async function typingView(textId) {
     const result = press(state, textChars, ch, Date.now());
     if (result === 'ignored') return;
     if (result === 'error') { flash(); kb.wrong(ch); }
+    if (state.finishedAt) rememberFinished(); // press() returns 'ignored' after the end, so this runs once
     us.set(stateKey, state);
     enqueue(state); // dirty flag: picked up by the sync loop
     render();
@@ -473,7 +585,7 @@ async function typingView(textId) {
       const data = await api('GET', `/api/texts/${text.id}/sessions`);
       renderLive(data);
     } catch (err) {
-      $live.replaceChildren(h('p', { class: isOffline(err) ? 'warn' : 'bad' },
+      fill($live, h('p', { class: isOffline(err) ? 'warn' : 'bad' },
         isOffline(err) ? 'Live-Ansicht: offline' : `Live-Ansicht: ${err.message}`));
     }
   }
@@ -491,7 +603,7 @@ async function typingView(textId) {
         h('td', {}, finished ? 'fertig' : active ? 'tippt' : 'inaktiv'),
       );
     };
-    $live.replaceChildren(
+    fill($live, 
       h('h2', {}, 'Live-Ansicht ', h('span', { class: 'muted' }, `(${sessions.length})`)),
       sessions.length === 0 ? h('p', { class: 'muted' }, 'Noch tippt niemand diesen Text.') :
         h('table', {},
@@ -506,7 +618,7 @@ async function typingView(textId) {
     liveTimer = setInterval(pollLive, LIVE_INTERVAL_MS);
   }
 
-  $app.replaceChildren(
+  fill($app, 
     h('section', { class: 'card' },
       h('div', { class: 'head' },
         h('h2', {}, text.title),
@@ -521,6 +633,7 @@ async function typingView(textId) {
       ),
       $typing,
       $stats,
+      $summary,
       kb.el,
     ),
     ...(isCreator ? [h('section', { class: 'card' }, $live)] : []),
