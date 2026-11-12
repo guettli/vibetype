@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -21,9 +22,10 @@ import (
 )
 
 type env struct {
-	t  *testing.T
-	ts *httptest.Server
-	st *store.Store
+	srv *Server
+	t   *testing.T
+	ts  *httptest.Server
+	st  *store.Store
 }
 
 func newEnv(t *testing.T) *env {
@@ -40,7 +42,7 @@ func newEnv(t *testing.T) *env {
 	}
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
-	return &env{t: t, ts: ts, st: st}
+	return &env{srv: srv, t: t, ts: ts, st: st}
 }
 
 // login creates a user (bypassing WebAuthn) and returns its session token.
@@ -168,7 +170,7 @@ func TestTextsAndSync(t *testing.T) {
 
 func TestStaticAndSPA(t *testing.T) {
 	e := newEnv(t)
-	for _, p := range []string{"/", "/t/abc123", "/static/app.js", "/static/engine.js", "/static/keyboard.js", "/static/style.css", "/sw.js", "/healthz"} {
+	for _, p := range []string{"/", "/t/abc123", "/konto", "/static/app.js", "/static/engine.js", "/static/keyboard.js", "/static/style.css", "/sw.js", "/healthz"} {
 		if c := e.do("", "GET", p, nil, nil); c != 200 {
 			t.Errorf("GET %s: %d", p, c)
 		}
@@ -489,5 +491,85 @@ func TestQR(t *testing.T) {
 	}
 	if c := e.do(tok, "GET", "/api/texts/nope42/qr.svg", nil, nil); c != 404 {
 		t.Fatalf("qr of unknown text: %d", c)
+	}
+}
+
+func TestAccount(t *testing.T) {
+	e := newEnv(t)
+	u, tok := e.login("Paula")
+	var me store.User
+	if c := e.do(tok, "PUT", "/api/me", map[string]string{"display_name": "  Paula   K. "}, &me); c != 200 || me.DisplayName != "Paula K." {
+		t.Fatalf("rename: %d %+v", c, me)
+	}
+	if c := e.do(tok, "PUT", "/api/me", map[string]string{"display_name": "vibetype"}, nil); c != 400 {
+		t.Fatalf("reserved rename: %d", c)
+	}
+	var pks []store.PasskeyInfo
+	if c := e.do(tok, "GET", "/api/me/passkeys", nil, &pks); c != 200 || len(pks) != 1 {
+		t.Fatalf("passkeys: %d %+v", c, pks)
+	}
+	if c := e.do(tok, "DELETE", "/api/me/passkeys/"+pks[0].ID, nil, nil); c != 409 {
+		t.Fatalf("deleting the last passkey must be refused: %d", c)
+	}
+	if err := e.st.AddPasskey(context.Background(), store.Passkey{ID: "second", UserID: u.ID, PublicKey: []byte{1}, Credential: []byte("{}")}, "Handy"); err != nil {
+		t.Fatal(err)
+	}
+	_, otherTok := e.login("Otto")
+	if c := e.do(otherTok, "DELETE", "/api/me/passkeys/second", nil, nil); c != 404 {
+		t.Fatalf("deleting someone else's passkey: %d", c)
+	}
+	if c := e.do(tok, "DELETE", "/api/me/passkeys/"+pks[0].ID, nil, nil); c != 204 {
+		t.Fatalf("delete: %d", c)
+	}
+	if e.do(tok, "GET", "/api/me/passkeys", nil, &pks); len(pks) != 1 || pks[0].Label != "Handy" {
+		t.Fatalf("after delete: %+v", pks)
+	}
+	var opts struct {
+		PublicKey struct {
+			ExcludeCredentials []any `json:"excludeCredentials"`
+		} `json:"publicKey"`
+	}
+	if c := e.do(tok, "POST", "/api/me/passkeys/begin", map[string]string{"label": "Laptop"}, &opts); c != 200 || len(opts.PublicKey.ExcludeCredentials) != 1 {
+		t.Fatalf("add begin: %d %+v", c, opts)
+	}
+	// the add ceremony cannot be used to sign up a new account
+	if c := e.do("", "POST", "/api/register/finish", map[string]string{}, nil); c != 400 {
+		t.Fatalf("finish without ceremony: %d", c)
+	}
+}
+
+func TestPasskeyChangesNeedRecentLogin(t *testing.T) {
+	e := newEnv(t)
+	u, tok := e.login("Rita")
+	if err := e.st.AddPasskey(context.Background(), store.Passkey{ID: "second", UserID: u.ID, PublicKey: []byte{1}, Credential: []byte("{}")}, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.st.AddPasskey(context.Background(), store.Passkey{ID: "second", UserID: u.ID, PublicKey: []byte{1}, Credential: []byte("{}")}, ""); !errors.Is(err, store.ErrDuplicate) {
+		t.Fatalf("duplicate credential: %v", err)
+	}
+	otherTok, err := e.st.CreateAuthSession(context.Background(), u.ID, time.Hour) // e.g. a stolen or forgotten session
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.srv.now = func() time.Time { return time.Now().Add(reauthWindow + time.Minute) }
+	var resp struct{ Error, Code string }
+	if c := e.do(tok, "DELETE", "/api/me/passkeys/second", nil, &resp); c != 403 || resp.Code != "reauth_required" {
+		t.Fatalf("stale login delete: %d %+v", c, resp)
+	}
+	if c := e.do(tok, "POST", "/api/me/passkeys/begin", map[string]string{"label": "x"}, &resp); c != 403 || resp.Code != "reauth_required" {
+		t.Fatalf("stale login add: %d %+v", c, resp)
+	}
+	if c := e.do(tok, "PUT", "/api/me", map[string]string{"display_name": "Rita R."}, nil); c != 200 {
+		t.Fatalf("rename needs no fresh login: %d", c)
+	}
+	e.srv.now = time.Now
+	if c := e.do(tok, "DELETE", "/api/me/passkeys/second", nil, nil); c != 204 {
+		t.Fatalf("fresh login delete: %d", c)
+	}
+	if c := e.do(otherTok, "GET", "/api/me", nil, nil); c != 401 {
+		t.Fatalf("other sessions must end when a passkey is deleted: %d", c)
+	}
+	if c := e.do(tok, "GET", "/api/me", nil, nil); c != 200 {
+		t.Fatalf("own session must survive: %d", c)
 	}
 }

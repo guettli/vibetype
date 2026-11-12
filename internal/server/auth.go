@@ -111,25 +111,13 @@ func (s *Server) registerBegin(w http.ResponseWriter, r *http.Request) {
 	if !readJSON(w, r, &in) {
 		return
 	}
-	name := strings.Join(strings.Fields(in.DisplayName), " ")
-	if name == "" || utf8.RuneCountInString(name) > maxNameLen {
-		httpError(w, http.StatusBadRequest, fmt.Sprintf("display name must have 1-%d characters", maxNameLen))
-		return
-	}
-	if strings.EqualFold(name, lessons.SystemUserName) {
-		// the built-in lessons are shown as "von vibetype"; nobody may look official
-		httpError(w, http.StatusBadRequest, fmt.Sprintf("the name %q is reserved", name))
+	name, msg := cleanName(in.DisplayName)
+	if msg != "" {
+		httpError(w, http.StatusBadRequest, msg)
 		return
 	}
 	u := &waUser{id: store.NewID(), name: name}
-	opts, data, err := s.wa.BeginRegistration(u,
-		webauthn.WithResidentKeyRequirement(protocol.ResidentKeyRequirementRequired),
-		webauthn.WithAuthenticatorSelection(protocol.AuthenticatorSelection{
-			ResidentKey:        protocol.ResidentKeyRequirementRequired,
-			RequireResidentKey: protocol.ResidentKeyRequired(),
-			UserVerification:   protocol.VerificationRequired,
-		}),
-	)
+	opts, data, err := s.wa.BeginRegistration(u, registrationOptions()...)
 	if err != nil {
 		s.internal(w, r, err)
 		return
@@ -145,7 +133,7 @@ func (s *Server) registerFinish(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if c.user == nil {
+	if c.user == nil || c.addFor != "" {
 		httpError(w, http.StatusBadRequest, "not a registration ceremony")
 		return
 	}
@@ -281,4 +269,168 @@ func describe(err error) string {
 		return pe.Details + ": " + pe.DevInfo
 	}
 	return err.Error()
+}
+
+// cleanName normalizes a display name; msg is non-empty if it is not acceptable.
+func cleanName(raw string) (name, msg string) {
+	name = strings.Join(strings.Fields(raw), " ")
+	if name == "" || utf8.RuneCountInString(name) > maxNameLen {
+		return "", fmt.Sprintf("display name must have 1-%d characters", maxNameLen)
+	}
+	if strings.EqualFold(name, lessons.SystemUserName) {
+		// the built-in lessons are shown as "von vibetype"; nobody may look official
+		return "", fmt.Sprintf("the name %q is reserved", name)
+	}
+	return name, ""
+}
+
+func registrationOptions(extra ...webauthn.RegistrationOption) []webauthn.RegistrationOption {
+	return append([]webauthn.RegistrationOption{
+		webauthn.WithResidentKeyRequirement(protocol.ResidentKeyRequirementRequired),
+		webauthn.WithAuthenticatorSelection(protocol.AuthenticatorSelection{
+			ResidentKey:        protocol.ResidentKeyRequirementRequired,
+			RequireResidentKey: protocol.ResidentKeyRequired(),
+			UserVerification:   protocol.VerificationRequired,
+		}),
+	}, extra...)
+}
+
+// ---- account: rename, list/add/delete passkeys ----
+
+func (s *Server) renameMe(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		DisplayName string `json:"display_name"`
+	}
+	if !readJSON(w, r, &in) {
+		return
+	}
+	name, msg := cleanName(in.DisplayName)
+	if msg != "" {
+		httpError(w, http.StatusBadRequest, msg)
+		return
+	}
+	u := userFrom(r.Context())
+	if err := s.cfg.Store.RenameUser(r.Context(), u.ID, name); err != nil {
+		s.internal(w, r, err)
+		return
+	}
+	u.DisplayName = name
+	writeJSON(w, http.StatusOK, u)
+}
+
+func (s *Server) listPasskeys(w http.ResponseWriter, r *http.Request) {
+	pks, err := s.cfg.Store.ListPasskeys(r.Context(), userFrom(r.Context()).ID)
+	if err != nil {
+		s.internal(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, pks)
+}
+
+const maxLabelLen = 40
+
+// reauthWindow: adding or deleting a passkey needs a login this recent, so a
+// stolen session cookie cannot be turned into a passkey the attacker keeps.
+const reauthWindow = 10 * time.Minute
+
+// recentLogin answers 403 {code: "reauth_required"} unless the current login is fresh.
+func (s *Server) recentLogin(w http.ResponseWriter, r *http.Request) bool {
+	if s.now().Sub(userFrom(r.Context()).LoggedInAt) <= reauthWindow {
+		return true
+	}
+	writeJSON(w, http.StatusForbidden, map[string]string{"error": "please sign in again with your passkey to change your passkeys", "code": "reauth_required"})
+	return false
+}
+
+// addPasskeyBegin starts registering another passkey (e.g. the phone or the
+// home PC) for the logged-in user. Existing credentials are excluded so the
+// same authenticator is not registered twice.
+func (s *Server) addPasskeyBegin(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Label string `json:"label"`
+	}
+	if !readJSON(w, r, &in) || !s.recentLogin(w, r) {
+		return
+	}
+	label := strings.Join(strings.Fields(in.Label), " ")
+	if utf8.RuneCountInString(label) > maxLabelLen {
+		httpError(w, http.StatusBadRequest, fmt.Sprintf("label longer than %d characters", maxLabelLen))
+		return
+	}
+	wu, err := s.loadWAUser(r, userFrom(r.Context()).ID)
+	if err != nil {
+		s.internal(w, r, err)
+		return
+	}
+	exclude := make([]protocol.CredentialDescriptor, 0, len(wu.creds))
+	for _, c := range wu.creds {
+		exclude = append(exclude, c.Descriptor())
+	}
+	opts, data, err := s.wa.BeginRegistration(wu, registrationOptions(webauthn.WithExclusions(exclude))...)
+	if err != nil {
+		s.internal(w, r, err)
+		return
+	}
+	if !s.putCeremony(w, ceremony{data: *data, user: wu, addFor: wu.id, label: label}) {
+		return
+	}
+	writeJSON(w, http.StatusOK, opts)
+}
+
+func (s *Server) addPasskeyFinish(w http.ResponseWriter, r *http.Request) {
+	c, ok := s.takeCeremony(w, r)
+	if !ok {
+		return
+	}
+	u := userFrom(r.Context())
+	if c.addFor == "" || c.addFor != u.ID {
+		httpError(w, http.StatusBadRequest, "not an add-passkey ceremony of this user")
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxWebAuthnBodyBytes)
+	cred, err := s.wa.FinishRegistration(c.user, c.data, r)
+	if err != nil {
+		s.cfg.Logger.Info("adding passkey failed", "user", u.ID, "err", describe(err))
+		httpError(w, http.StatusBadRequest, "adding the passkey failed")
+		return
+	}
+	pk, err := toPasskey(cred, u.ID)
+	if err != nil {
+		s.internal(w, r, err)
+		return
+	}
+	if err := s.cfg.Store.AddPasskey(r.Context(), pk, c.label); errors.Is(err, store.ErrDuplicate) {
+		httpError(w, http.StatusConflict, "this passkey is already registered")
+		return
+	} else if err != nil {
+		s.internal(w, r, err)
+		return
+	}
+	s.listPasskeys(w, r)
+}
+
+func (s *Server) deletePasskey(w http.ResponseWriter, r *http.Request) {
+	if !s.recentLogin(w, r) {
+		return
+	}
+	uid := userFrom(r.Context()).ID
+	err := s.cfg.Store.DeletePasskey(r.Context(), uid, r.PathValue("id"))
+	if err == nil {
+		// whoever logged in with the deleted passkey must not stay logged in
+		c, _ := r.Cookie(sessionCookie) // present: auth() checked it
+		if _, err = s.cfg.Store.DeleteOtherAuthSessions(r.Context(), uid, c.Value); err != nil {
+			s.internal(w, r, fmt.Errorf("end other sessions: %w", err))
+			return
+		}
+	}
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		httpError(w, http.StatusNotFound, "passkey not found")
+	case errors.Is(err, store.ErrLastPasskey):
+		httpError(w, http.StatusConflict, "this is your only passkey; add another one before deleting it")
+	case err != nil:
+		s.internal(w, r, err)
+	default:
+		w.WriteHeader(http.StatusNoContent)
+	}
 }

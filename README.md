@@ -17,6 +17,13 @@ jeder Nutzer kann Texte anlegen, per Link/Code teilen und sieht live, wer seinen
   Großschreibung folgt der 10-Finger-Regel: Shift drückt der kleine Finger der jeweils anderen Hand. Bei QWERTZ werden
   Tottasten in zwei Schritten erklärt: `^` allein ist „^, dann Leertaste“, `é` ist „´, dann e“. Zeichen, die auf dem
   Layout fehlen (z. B. ñ), zeigen „Taste nicht auf diesem Layout“.
+* **Konto:** Unter `/konto` (Klick auf den eigenen Namen) lässt sich der Anzeigename ändern. Dort kann man auch weitere
+  Passkeys anlegen, etwa für das Handy oder den PC zu Hause, falls der Passkey nicht ohnehin über iCloud oder Google
+  synchronisiert wird. Bereits registrierte Authenticators werden dabei ausgeschlossen. Passkeys lassen sich mit
+  Bezeichnung, Anlage- und Nutzungsdatum auflisten und löschen, der letzte jedoch nicht, weil man sich sonst aussperrt.
+  Hinzufügen und Löschen verlangen eine Anmeldung aus den letzten 10 Minuten. Sonst fragt die App den Passkey erneut ab
+  und wiederholt die Aktion. So kann ein gestohlenes Sitzungs-Cookie nicht in einen dauerhaften Passkey des Angreifers
+  verwandelt werden. Beim Löschen eines Passkeys werden alle anderen Anmeldungen des Kontos beendet.
 * **Klassenraum-Modus:** Der Ersteller eines Texts sieht über der Live-Ansicht einen QR-Code mit dem Teilen-Link,
   dazu den Code und die URL. „Präsentieren“ schaltet diese Karte in Vollbild mit großer Schrift für den Beamer. Die
   Schüler scannen den QR-Code oder tippen den Code ein. Die Live-Ansicht ist nach Fortschritt sortiert, bei Gleichstand
@@ -116,6 +123,7 @@ go run . -addr :8099 -origin http://localhost:8099 -db /tmp/e2e.db &
   per `ALTER TABLE` nachgerüstet.
 * `texts.kind` ist `''` für selbst geschriebene Texte und `practice` für erzeugte Übungstexte (nachgerüstet wie
   `key_errors`).
+* `passkeys.label` und `passkeys.last_used_at` (wird bei jedem Login gesetzt) sind ebenfalls nachgerüstet.
 * `auth_sessions` enthält die Login-Sitzungen. Gespeichert wird nur der SHA-256 des Cookie-Tokens.
 
 ### Texte
@@ -179,6 +187,12 @@ letzten 60 s.
 | POST | `/api/register/begin` `{display_name}` · `/api/register/finish` | Passkey anlegen = Account anlegen |
 | POST | `/api/login/begin` · `/api/login/finish` | Passkey-Login (ohne Benutzernamen) |
 | POST | `/api/logout` | |
+| PUT | `/api/me` `{display_name}` | Anzeigename ändern |
+| GET | `/api/me/passkeys` | eigene Passkeys (`id`, `label`, `created_at`, `last_used_at`) |
+| POST | `/api/me/passkeys/begin` `{label}` · `/api/me/passkeys/finish` | weiteren Passkey anlegen |
+| DELETE | `/api/me/passkeys/{id}` | Passkey löschen; 409 beim letzten; beendet alle anderen Anmeldungen |
+
+Änderungen an Passkeys verlangen eine Anmeldung aus den letzten 10 Minuten, sonst kommt `403 {"code": "reauth_required"}`.
 | GET | `/api/me` | |
 | GET/POST | `/api/texts` | eigene Texte / neuen Text anlegen |
 | GET | `/api/texts/{id}` | jeder angemeldete Nutzer (Teilen per Link); bei Lektionen zusätzlich `next_lesson` |

@@ -12,15 +12,16 @@ async function newUser(name) {
   page.on('pageerror', (e) => errors.push(`${name}: ${e.message}`));
   const cdp = await ctx.newCDPSession(page);
   await cdp.send('WebAuthn.enable');
-  await cdp.send('WebAuthn.addVirtualAuthenticator', { options: {
+  const authOptions = { options: {
     protocol: 'ctap2', transport: 'internal', hasResidentKey: true, hasUserVerification: true,
-    isUserVerified: true, automaticPresenceSimulation: true } });
+    isUserVerified: true, automaticPresenceSimulation: true } };
+  const { authenticatorId } = await cdp.send('WebAuthn.addVirtualAuthenticator', authOptions);
   await page.goto(BASE + '/');
   await page.fill('input[placeholder^="Dein Name"]', name);
   await page.click('text=Passkey erstellen');
   try { await page.waitForSelector(`#user:has-text("${name}")`, { timeout: 8000 }); }
   catch (e) { console.log('BODY:', await page.innerText('body'), errors); throw e; }
-  return { ctx, page };
+  return { ctx, page, cdp, authenticatorId, authOptions };
 }
 const step = (s) => console.log('✓', s);
 
@@ -38,6 +39,27 @@ await A.page.waitForSelector('text=Mit Passkey anmelden');
 await A.page.click('text=Mit Passkey anmelden');
 await A.page.waitForSelector('#user:has-text("Alice")');
 step('Alice logout + passkey login (discoverable)');
+
+// account: rename, add a passkey on a "second device", log in with it, delete the first one
+await A.page.click('#user a');
+await A.page.waitForSelector('ul.passkeys li:has-text("Passkey vom")');
+await A.page.fill('input[aria-label="Anzeigename"]', 'Alice B.');
+await A.page.click('text=Speichern');
+await A.page.waitForSelector('#user a:text("Alice B.")');
+await A.cdp.send('WebAuthn.removeVirtualAuthenticator', { authenticatorId: A.authenticatorId });
+await A.cdp.send('WebAuthn.addVirtualAuthenticator', A.authOptions);
+await A.page.fill('input[aria-label="Bezeichnung des neuen Passkeys"]', 'Zweitgerät');
+await A.page.click('text=Passkey hinzufügen');
+await A.page.waitForSelector('ul.passkeys li:has-text("Zweitgerät")');
+await A.page.click('text=abmelden');
+await A.page.click('text=Mit Passkey anmelden');
+await A.page.waitForSelector('#user:has-text("Alice B.")');
+await A.page.click('#user a');
+A.page.once('dialog', (d) => d.accept());
+await A.page.click('ul.passkeys li:has-text("Passkey vom") >> text=löschen');
+await A.page.waitForSelector('ul.passkeys li:has-text("Passkey vom")', { state: 'detached' });
+if (await A.page.$('ul.passkeys button')) throw new Error('the last passkey must not be deletable');
+step('account: renamed, second passkey added and used to log in, first one deleted');
 
 // built-in lessons: list, type lesson 1 completely, summary links to lesson 2, home shows ✓
 await A.page.goto(BASE + '/');
