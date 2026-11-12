@@ -1,0 +1,69 @@
+:root {
+  --bg: #f6f5f2; --card: #fff; --fg: #1d1d1b; --muted: #77756f; --line: #e2e0da;
+  --accent: #2f6fdb; --ok: #2e8b57; --bad: #c62828; --warn: #b26a00;
+  --done: #9a9890; --cur-bg: #dbe7fb;
+  --mono: ui-monospace, "SF Mono", "Cascadia Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  color-scheme: light dark;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #18181a; --card: #222225; --fg: #ececea; --muted: #9a9890; --line: #36363a;
+    --accent: #7aa7ff; --ok: #6cc08b; --bad: #ff6b6b; --warn: #f0a940;
+    --done: #6d6c68; --cur-bg: #2c3d5c;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.5 system-ui, sans-serif; }
+header { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; max-width: 960px; margin: 0 auto; }
+.logo { font: 700 20px var(--mono); color: var(--fg); text-decoration: none; }
+main { max-width: 960px; margin: 0 auto; padding: 0 16px 48px; }
+#status { max-width: 960px; margin: 0 auto; padding: 0 16px; min-height: 1.5em; font-size: 14px; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 16px 20px; margin: 16px 0; }
+.narrow { max-width: 420px; margin: 48px auto; }
+h2 { margin: 0 0 12px; font-size: 20px; }
+h3 { font-size: 16px; }
+hr { border: 0; border-top: 1px solid var(--line); margin: 20px 0; }
+input, textarea { width: 100%; font: inherit; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg); margin-bottom: 8px; }
+textarea { font-family: var(--mono); resize: vertical; }
+button { font: inherit; padding: 8px 14px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); cursor: pointer; }
+button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button.link { border: 0; padding: 0; background: none; color: var(--accent); text-decoration: underline; }
+a { color: var(--accent); }
+.row { display: flex; gap: 8px; }
+.row input { margin: 0; }
+.muted { color: var(--muted); }
+.bad { color: var(--bad); }
+.warn { color: var(--warn); }
+code { font-family: var(--mono); background: var(--bg); padding: 1px 5px; border-radius: 4px; }
+ul.texts { list-style: none; padding: 0; margin: 0; }
+ul.texts li { padding: 6px 0; border-bottom: 1px solid var(--line); }
+.head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 16px; margin-bottom: 12px; }
+.head h2 { margin: 0; }
+
+/* typing area */
+.typing { font: 22px/1.7 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; padding: 16px; border-radius: 8px;
+  background: var(--bg); max-height: 50vh; overflow-y: auto; outline: none; }
+.typing:focus { box-shadow: 0 0 0 2px var(--accent) inset; }
+.typing .done { color: var(--done); }
+.typing .cur { background: var(--cur-bg); border-bottom: 3px solid var(--accent); border-radius: 2px; }
+.typing .error-flash { animation: error-flash 0.35s ease; }
+@keyframes error-flash {
+  0%, 100% { transform: translateX(0); }
+  15% { background: var(--bad); color: #fff; transform: translateX(-3px); }
+  45% { background: var(--bad); color: #fff; transform: translateX(3px); }
+  75% { transform: translateX(-2px); }
+}
+.typing .cur { display: inline-block; min-width: 0.6em; white-space: pre; }
+.stats { display: flex; flex-wrap: wrap; gap: 8px 24px; align-items: center; margin-top: 12px; color: var(--muted); }
+.stats b { color: var(--fg); font-size: 20px; font-variant-numeric: tabular-nums; }
+
+/* live view */
+table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+td.num { text-align: right; }
+tr.active td:first-child { font-weight: 600; }
+tr.active td:last-child { color: var(--ok); }
+.bar { display: inline-block; width: 120px; height: 8px; background: var(--bg); border-radius: 4px; overflow: hidden; vertical-align: middle; }
+.bar .fill { height: 100%; background: var(--accent); }
+@media (max-width: 600px) { .typing { font-size: 18px; } .bar { width: 60px; } }
+.typing .cur:empty { display: none; }

@@ -1,0 +1,384 @@
+// Package server contains the HTTP handlers of vibetype.
+package server
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io/fs"
+	"log/slog"
+	"net/http"
+	"strings"
+	"sync"
+	"time"
+	"unicode/utf8"
+
+	"github.com/go-webauthn/webauthn/webauthn"
+
+	"github.com/guettli/vibetype/internal/store"
+	"github.com/guettli/vibetype/internal/textnorm"
+)
+
+const (
+	sessionCookie  = "vt_session"
+	ceremonyCookie = "vt_ceremony"
+	sessionTTL     = 180 * 24 * time.Hour
+	ceremonyTTL    = 5 * time.Minute
+
+	maxTitleLen   = 200
+	maxContentLen = 20000
+	maxNameLen    = 64
+
+	maxCPM               = 3000 // world records are around 1000-1300 cpm
+	maxSessionsPerText   = 50   // per user and text
+	maxPendingCeremonies = 10000
+	maxWebAuthnBodyBytes = 64 << 10
+)
+
+// Config configures the server.
+type Config struct {
+	Version string // shown by /healthz
+	RPID    string // e.g. vibetype.thomas-guettler.de
+	Origin  string // e.g. https://vibetype.thomas-guettler.de
+	Static  fs.FS  // frontend assets (index.html, app.js, ...)
+	Logger  *slog.Logger
+	Store   *store.Store
+}
+
+// Server implements http.Handler.
+type Server struct {
+	cfg    Config
+	wa     *webauthn.WebAuthn
+	mux    *http.ServeMux
+	secure bool
+
+	mu         sync.Mutex
+	ceremonies map[string]ceremony // key: random id in ceremonyCookie
+}
+
+type ceremony struct {
+	data    webauthn.SessionData
+	user    *waUser // only set during registration
+	expires time.Time
+}
+
+// New builds the server.
+func New(cfg Config) (*Server, error) {
+	wa, err := webauthn.New(&webauthn.Config{
+		RPID:          cfg.RPID,
+		RPDisplayName: "vibetype",
+		RPOrigins:     []string{cfg.Origin},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("webauthn config: %w", err)
+	}
+	s := &Server{
+		cfg:        cfg,
+		wa:         wa,
+		mux:        http.NewServeMux(),
+		secure:     strings.HasPrefix(cfg.Origin, "https://"),
+		ceremonies: map[string]ceremony{},
+	}
+	s.routes()
+	return s, nil
+}
+
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// CSRF protection: every state-changing request must come from our own origin.
+	// SameSite=Lax alone is not enough, sibling subdomains count as same-site.
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		if origin := r.Header.Get("Origin"); origin != s.cfg.Origin {
+			httpError(w, http.StatusForbidden, fmt.Sprintf("cross-origin request refused (Origin %q)", origin))
+			return
+		}
+	}
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Referrer-Policy", "same-origin")
+	w.Header().Set("Content-Security-Policy", "default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:; frame-ancestors 'none'")
+	s.mux.ServeHTTP(w, r)
+}
+
+func (s *Server) routes() {
+	m := s.mux
+	m.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { fmt.Fprintf(w, "ok %s\n", s.cfg.Version) })
+
+	m.HandleFunc("POST /api/register/begin", s.registerBegin)
+	m.HandleFunc("POST /api/register/finish", s.registerFinish)
+	m.HandleFunc("POST /api/login/begin", s.loginBegin)
+	m.HandleFunc("POST /api/login/finish", s.loginFinish)
+	m.HandleFunc("POST /api/logout", s.logout)
+
+	m.HandleFunc("GET /api/me", s.auth(s.me))
+	m.HandleFunc("GET /api/texts", s.auth(s.listTexts))
+	m.HandleFunc("POST /api/texts", s.auth(s.createText))
+	m.HandleFunc("GET /api/texts/{id}", s.auth(s.getText))
+	m.HandleFunc("GET /api/texts/{id}/sessions", s.auth(s.liveSessions))
+	m.HandleFunc("PUT /api/sessions/{id}", s.auth(s.syncSession))
+
+	static := http.FileServerFS(s.cfg.Static)
+	m.Handle("GET /static/", http.StripPrefix("/static/", static))
+	m.HandleFunc("GET /sw.js", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-cache")
+		http.ServeFileFS(w, r, s.cfg.Static, "sw.js")
+	})
+	index := func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-cache")
+		http.ServeFileFS(w, r, s.cfg.Static, "index.html")
+	}
+	m.HandleFunc("GET /{$}", index)
+	m.HandleFunc("GET /t/{id}", index)
+}
+
+// ---- helpers ----
+
+type ctxKey struct{}
+
+func userFrom(ctx context.Context) store.User { return ctx.Value(ctxKey{}).(store.User) }
+
+func (s *Server) auth(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		c, err := r.Cookie(sessionCookie)
+		if err != nil {
+			httpError(w, http.StatusUnauthorized, "not logged in")
+			return
+		}
+		u, err := s.cfg.Store.UserForToken(r.Context(), c.Value)
+		if errors.Is(err, store.ErrNotFound) {
+			httpError(w, http.StatusUnauthorized, "session expired")
+			return
+		}
+		if err != nil {
+			s.internal(w, r, err)
+			return
+		}
+		h(w, r.WithContext(context.WithValue(r.Context(), ctxKey{}, u)))
+	}
+}
+
+func httpError(w http.ResponseWriter, code int, msg string) {
+	writeJSON(w, code, map[string]string{"error": msg})
+}
+
+func (s *Server) internal(w http.ResponseWriter, r *http.Request, err error) {
+	s.cfg.Logger.Error("internal error", "method", r.Method, "path", r.URL.Path, "err", err)
+	httpError(w, http.StatusInternalServerError, "internal error")
+}
+
+func writeJSON(w http.ResponseWriter, code int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+func readJSON(w http.ResponseWriter, r *http.Request, v any) bool {
+	if ct := r.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		httpError(w, http.StatusUnsupportedMediaType, "Content-Type must be application/json")
+		return false
+	}
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 256<<10))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		httpError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return false
+	}
+	return true
+}
+
+func (s *Server) setCookie(w http.ResponseWriter, name, value string, ttl time.Duration) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     name,
+		Value:    value,
+		Path:     "/",
+		MaxAge:   int(ttl.Seconds()),
+		HttpOnly: true,
+		Secure:   s.secure,
+		SameSite: http.SameSiteLaxMode,
+	})
+}
+
+// ---- texts ----
+
+func (s *Server) me(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, userFrom(r.Context()))
+}
+
+func (s *Server) listTexts(w http.ResponseWriter, r *http.Request) {
+	texts, err := s.cfg.Store.TextsByCreator(r.Context(), userFrom(r.Context()).ID)
+	if err != nil {
+		s.internal(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, texts)
+}
+
+func (s *Server) createText(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Title   string `json:"title"`
+		Content string `json:"content"`
+	}
+	if !readJSON(w, r, &in) {
+		return
+	}
+	title := strings.Join(strings.Fields(in.Title), " ")
+	content := textnorm.Normalize(in.Content)
+	switch {
+	case title == "":
+		httpError(w, http.StatusBadRequest, "title is empty")
+		return
+	case utf8.RuneCountInString(title) > maxTitleLen:
+		httpError(w, http.StatusBadRequest, fmt.Sprintf("title longer than %d characters", maxTitleLen))
+		return
+	case content == "":
+		httpError(w, http.StatusBadRequest, "content is empty")
+		return
+	case utf8.RuneCountInString(content) > maxContentLen:
+		httpError(w, http.StatusBadRequest, fmt.Sprintf("content longer than %d characters", maxContentLen))
+		return
+	}
+	if bad := textnorm.Untypable(content); len(bad) > 0 {
+		httpError(w, http.StatusBadRequest, fmt.Sprintf("content contains characters that cannot be typed on a keyboard: %q", string(bad)))
+		return
+	}
+	u := userFrom(r.Context())
+	t, err := s.cfg.Store.CreateText(r.Context(), u.ID, title, content)
+	if err != nil {
+		s.internal(w, r, err)
+		return
+	}
+	t.CreatorName = u.DisplayName
+	writeJSON(w, http.StatusCreated, t)
+}
+
+func (s *Server) getText(w http.ResponseWriter, r *http.Request) {
+	t, err := s.cfg.Store.GetText(r.Context(), r.PathValue("id"))
+	if errors.Is(err, store.ErrNotFound) {
+		httpError(w, http.StatusNotFound, "text not found")
+		return
+	}
+	if err != nil {
+		s.internal(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, t)
+}
+
+// liveSessions returns all typing sessions of a text. Only the creator of the
+// text gets the live view.
+func (s *Server) liveSessions(w http.ResponseWriter, r *http.Request) {
+	t, err := s.cfg.Store.GetText(r.Context(), r.PathValue("id"))
+	if errors.Is(err, store.ErrNotFound) {
+		httpError(w, http.StatusNotFound, "text not found")
+		return
+	}
+	if err != nil {
+		s.internal(w, r, err)
+		return
+	}
+	if t.CreatorID != userFrom(r.Context()).ID {
+		httpError(w, http.StatusForbidden, "only the creator of a text sees the live view")
+		return
+	}
+	sessions, err := s.cfg.Store.TypingSessionsForText(r.Context(), t.ID, 500)
+	if err != nil {
+		s.internal(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"server_time": time.Now().UTC(), "sessions": sessions})
+}
+
+// syncSession is called by the client sync loop every few seconds.
+func (s *Server) syncSession(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		TextID     string     `json:"text_id"`
+		CursorPos  int        `json:"cursor_pos"`
+		ErrorCount int        `json:"error_count"`
+		CPM        int        `json:"cpm"`
+		StartedAt  time.Time  `json:"started_at"`
+		FinishedAt *time.Time `json:"finished_at"`
+	}
+	if !readJSON(w, r, &in) {
+		return
+	}
+	id := r.PathValue("id")
+	if len(id) < 8 || len(id) > 64 {
+		httpError(w, http.StatusBadRequest, "invalid session id")
+		return
+	}
+	t, err := s.cfg.Store.GetText(r.Context(), in.TextID)
+	if errors.Is(err, store.ErrNotFound) {
+		httpError(w, http.StatusNotFound, "text not found")
+		return
+	}
+	if err != nil {
+		s.internal(w, r, err)
+		return
+	}
+	n := utf8.RuneCountInString(t.Content)
+	now := time.Now()
+	switch {
+	case in.CursorPos < 0 || in.CursorPos > n || in.ErrorCount < 0:
+		httpError(w, http.StatusBadRequest, "invalid progress values")
+		return
+	case in.CPM < 0 || in.CPM > maxCPM:
+		httpError(w, http.StatusBadRequest, fmt.Sprintf("cpm must be between 0 and %d", maxCPM))
+		return
+	case in.StartedAt.IsZero() || in.StartedAt.After(now.Add(time.Minute)):
+		httpError(w, http.StatusBadRequest, "started_at missing or in the future")
+		return
+	case in.FinishedAt != nil && in.CursorPos != n:
+		httpError(w, http.StatusBadRequest, "finished_at set but text not completed")
+		return
+	case in.FinishedAt != nil && (in.FinishedAt.Before(in.StartedAt) || in.FinishedAt.After(now.Add(time.Minute))):
+		httpError(w, http.StatusBadRequest, "finished_at before started_at or in the future")
+		return
+	}
+	ts, err := s.cfg.Store.UpsertTypingSession(r.Context(), store.TypingSession{
+		ID: id, TextID: t.ID, UserID: userFrom(r.Context()).ID,
+		CursorPos: in.CursorPos, ErrorCount: in.ErrorCount, CPM: in.CPM,
+		StartedAt: in.StartedAt.UTC(), FinishedAt: utcPtr(in.FinishedAt),
+	}, maxSessionsPerText)
+	if errors.Is(err, store.ErrLimit) {
+		httpError(w, http.StatusTooManyRequests, fmt.Sprintf("more than %d typing sessions on this text", maxSessionsPerText))
+		return
+	}
+	if errors.Is(err, store.ErrForbidden) {
+		httpError(w, http.StatusForbidden, "session belongs to another user or text")
+		return
+	}
+	if err != nil {
+		s.internal(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"id": ts.ID, "updated_at": ts.UpdatedAt})
+}
+
+func utcPtr(t *time.Time) *time.Time {
+	if t == nil {
+		return nil
+	}
+	u := t.UTC()
+	return &u
+}
+
+// RunJanitor periodically drops expired passkey ceremonies and login sessions
+// until ctx is done.
+func (s *Server) RunJanitor(ctx context.Context, every time.Duration) {
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		s.sweepCeremonies()
+		n, err := s.cfg.Store.DeleteExpiredAuthSessions(ctx)
+		if err != nil && ctx.Err() == nil {
+			s.cfg.Logger.Error("delete expired login sessions", "err", err)
+		} else if n > 0 {
+			s.cfg.Logger.Info("deleted expired login sessions", "count", n)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
+}
