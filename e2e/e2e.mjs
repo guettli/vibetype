@@ -107,6 +107,16 @@ await A.page.waitForSelector('tr.active:has-text("Bob"):has-text("41 %")', { tim
 const row = await A.page.$eval('tr.active', (el) => el.innerText);
 step('Alice live view: ' + row.replace(/\s+/g, ' '));
 
+// classroom: QR code of the share link + presentation mode
+await A.page.waitForFunction(() => document.querySelector('img.qr')?.naturalWidth > 0);
+await A.page.click('text=Präsentieren');
+await A.page.waitForSelector('.live-card.present');
+await A.page.waitForSelector('text=Präsentation beenden');
+if (process.env.SHOT_DIR) await A.page.screenshot({ path: process.env.SHOT_DIR + '/present.png' });
+await A.page.click('text=Präsentation beenden');
+await A.page.waitForSelector('.live-card:not(.present)');
+step('QR code loads, presentation mode toggles');
+
 await B.ctx.setOffline(true);
 await B.page.keyboard.type(' "Welt"');
 await B.page.waitForSelector('text=Nochmal');

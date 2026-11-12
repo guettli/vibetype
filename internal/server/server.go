@@ -120,6 +120,7 @@ func (s *Server) routes() {
 	m.HandleFunc("GET /api/texts/{id}", s.auth(s.getText))
 	m.HandleFunc("GET /api/texts/{id}/sessions", s.auth(s.liveSessions))
 	m.HandleFunc("DELETE /api/texts/{id}", s.auth(s.deleteText))
+	m.HandleFunc("GET /api/texts/{id}/qr.svg", s.auth(s.textQR))
 	m.HandleFunc("GET /api/me/results", s.auth(s.myResults))
 	m.HandleFunc("GET /api/lessons", s.auth(s.listLessons))
 	m.HandleFunc("GET /api/me/weak-keys", s.auth(s.weakKeys))

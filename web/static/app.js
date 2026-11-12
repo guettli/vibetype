@@ -392,7 +392,7 @@ async function homeView() {
   const resultsReq = flush().then(() => api('GET', '/api/me/results'));
   resultsReq.catch(() => {}); // handled by each consumer
 
-  fill($app, 
+  fill($app,
     h('section', { class: 'card' },
       h('h2', {}, 'Text öffnen'),
       h('form', { class: 'row', onsubmit: (e) => { e.preventDefault(); navigate('/t/' + code.value.trim().toLowerCase()); } },
@@ -683,6 +683,8 @@ async function typingView(textId) {
   }
   function renderLive({ server_time, sessions }) {
     const now = Date.parse(server_time);
+    // ranking: most progress first, then faster
+    sessions = [...sessions].sort((a, b) => b.cursor_pos - a.cursor_pos || b.cpm - a.cpm);
     const row = (s) => {
       const finished = !!s.finished_at;
       const active = !finished && now - Date.parse(s.updated_at) < ACTIVE_WINDOW_MS;
@@ -695,8 +697,10 @@ async function typingView(textId) {
         h('td', {}, finished ? 'fertig' : active ? 'tippt' : 'inaktiv'),
       );
     };
-    fill($live, 
-      h('h2', {}, 'Live-Ansicht ', h('span', { class: 'muted' }, `(${sessions.length})`)),
+    fill($live,
+      h('div', { class: 'live-head' },
+        h('h2', {}, 'Live-Ansicht ', h('span', { class: 'muted' }, `(${sessions.length})`)),
+        h('button', { onclick: togglePresent }, document.fullscreenElement ? 'Präsentation beenden' : 'Präsentieren')),
       sessions.length === 0 ? h('p', { class: 'muted' }, 'Noch tippt niemand diesen Text.') :
         h('table', {},
           h('thead', {}, h('tr', {}, h('th', {}, 'Name'), h('th', {}, 'Fortschritt'), h('th', {}, 'Anschl./min'), h('th', {}, 'Fehler'), h('th', {}, 'Status'))),
@@ -705,12 +709,31 @@ async function typingView(textId) {
     // CSP forbids inline style attributes; set widths via CSSOM instead
     for (const el of $live.querySelectorAll('.fill')) el.style.width = el.dataset.pct + '%';
   }
+  // Classroom: the creator shows the share link as code + QR code on the projector.
+  const $share = h('div', { class: 'share' },
+    h('img', { src: `/api/texts/${encodeURIComponent(text.id)}/qr.svg`, alt: `QR-Code für ${shareUrl}`, class: 'qr' }),
+    h('div', {},
+      h('div', { class: 'share-title' }, text.title),
+      h('div', {}, 'Code ', h('code', { class: 'big-code' }, text.id)),
+      h('div', { class: 'muted share-url' }, shareUrl)));
+  const $liveCard = h('section', { class: 'card live-card' }, $share, $live);
+  async function togglePresent() {
+    try {
+      if (document.fullscreenElement) await document.exitFullscreen();
+      else await $liveCard.requestFullscreen();
+    } catch (err) { fail(`Vollbild nicht möglich: ${err.message}`); }
+  }
+  function onFullscreenChange() {
+    $liveCard.classList.toggle('present', document.fullscreenElement === $liveCard);
+    pollLive(); // re-render the button label
+  }
   if (isCreator) {
+    document.addEventListener('fullscreenchange', onFullscreenChange);
     pollLive();
     liveTimer = setInterval(pollLive, LIVE_INTERVAL_MS);
   }
 
-  fill($app, 
+  fill($app,
     h('section', { class: 'card' },
       h('div', { class: 'head' },
         h('h2', {}, text.title),
@@ -728,7 +751,7 @@ async function typingView(textId) {
       $summary,
       kb.el,
     ),
-    ...(isCreator ? [h('section', { class: 'card' }, $live)] : []),
+    ...(isCreator ? [$liveCard] : []),
   );
   render();
   $typing.focus();
@@ -737,6 +760,8 @@ async function typingView(textId) {
     document.removeEventListener('keydown', onKey);
     clearInterval(statsTimer);
     if (liveTimer) clearInterval(liveTimer);
+    document.removeEventListener('fullscreenchange', onFullscreenChange);
+    if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
   };
 }
 

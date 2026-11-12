@@ -17,6 +17,10 @@ jeder Nutzer kann Texte anlegen, per Link/Code teilen und sieht live, wer seinen
   Großschreibung folgt der 10-Finger-Regel: Shift drückt der kleine Finger der jeweils anderen Hand. Bei QWERTZ werden
   Tottasten in zwei Schritten erklärt: `^` allein ist „^, dann Leertaste“, `é` ist „´, dann e“. Zeichen, die auf dem
   Layout fehlen (z. B. ñ), zeigen „Taste nicht auf diesem Layout“.
+* **Klassenraum-Modus:** Der Ersteller eines Texts sieht über der Live-Ansicht einen QR-Code mit dem Teilen-Link,
+  dazu den Code und die URL. „Präsentieren“ schaltet diese Karte in Vollbild mit großer Schrift für den Beamer. Die
+  Schüler scannen den QR-Code oder tippen den Code ein. Die Live-Ansicht ist nach Fortschritt sortiert, bei Gleichstand
+  nach Anschlägen/min. Den QR-Code erzeugt der Server als SVG (`rsc.io/qr`), er bleibt bei jeder Größe scharf.
 * **Lektionen:** Ein eingebauter Kurs mit 13 Lektionen für die deutsche QWERTZ-Tastatur. Er beginnt mit der
   Grundreihe (asdf jklö) und führt dann Lektion für Lektion neue Tasten ein: obere und untere Reihe, Großbuchstaben,
   Zahlen, Satz- und Sonderzeichen. Jede Lektion nutzt nur Tasten, die vorher schon eingeführt wurden. Das prüft
@@ -163,7 +167,7 @@ vorkommt, jeder Wert muss zwischen 1 und `error_count` liegen, und die Summe dar
 
 ### Live-Ansicht
 
-Der Ersteller fragt `GET /api/texts/{id}/sessions` alle 3 s ab. Als „tippt“ gilt eine Sitzung mit einem Sync in den
+Der Ersteller fragt `GET /api/texts/{id}/sessions` alle 3 s ab (Anzeige sortiert nach Fortschritt). Als „tippt“ gilt eine Sitzung mit einem Sync in den
 letzten 60 s.
 
 ## API
@@ -180,6 +184,7 @@ letzten 60 s.
 | GET | `/api/lessons` | eingebaute Lektionen in Kursreihenfolge (`id`, `title`, `length`) |
 | GET | `/api/me/weak-keys` | Problemtasten: `keys` (`char`, `errors`, `attempts`, `rate`), `days`, `min_attempts` |
 | POST | `/api/me/practice` | erstellt einen Übungstext für die Problemtasten (201) oder 409, solange es keine gibt |
+| GET | `/api/texts/{id}/qr.svg` | QR-Code des Teilen-Links (`<origin>/t/{id}`) als SVG |
 | DELETE | `/api/texts/{id}` | nur der Ersteller; löscht auch alle Sitzungen auf dem Text |
 | GET | `/api/me/results[?text_id=…]` | eigene Sitzungen mit Texttitel und -länge, neueste zuerst (max. 200), dazu `best` (pro Text die beste beendete Sitzung über alle Sitzungen: `id`, `text_id`, `cpm`) |
 | PUT | `/api/sessions/{id}` | Sync |

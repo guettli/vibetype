@@ -118,3 +118,19 @@ table.weak td { border-bottom: 0; padding: 4px 8px; }
 .keycap { display: inline-block; min-width: 2em; text-align: center; padding: 2px 8px; border: 1px solid var(--line); border-bottom-width: 3px;
   border-radius: 6px; font: 600 16px var(--mono); background: var(--bg); }
 @media (max-width: 600px) { table.weak td:last-child { display: none; } }
+
+/* classroom: share link as QR + code, presentation mode */
+.share { display: flex; gap: 16px; align-items: center; margin-bottom: 12px; }
+.share .qr { width: 96px; height: 96px; image-rendering: pixelated; border-radius: 4px; }
+.share-title { font-weight: 600; }
+.big-code { font-size: 18px; }
+.share-url { font-size: 13px; overflow-wrap: anywhere; }
+.live-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+.live-card.present { margin: 0; border: 0; border-radius: 0; padding: 32px 48px; overflow: auto; background: var(--card); }
+.live-card.present .share { gap: 48px; margin-bottom: 32px; }
+.live-card.present .qr { width: min(30vh, 320px); height: min(30vh, 320px); }
+.live-card.present .share-title { font-size: 40px; }
+.live-card.present .big-code { font-size: 64px; letter-spacing: 0.1em; }
+.live-card.present .share-url { font-size: 24px; }
+.live-card.present table { font-size: 24px; }
+.live-card.present .bar { width: 240px; height: 14px; }
