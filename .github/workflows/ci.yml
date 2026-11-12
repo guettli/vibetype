@@ -1,0 +1,26 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: test -z "$(gofmt -l .)"
+      - run: go vet ./...
+      - run: go test ./...
+      - run: node --test web/test/*.test.mjs
+      - name: e2e
+        run: |
+          go build -o vibetype .
+          ./vibetype -addr :8099 -origin http://localhost:8099 -db "$RUNNER_TEMP/e2e.db" &
+          cd e2e && npm install && npx playwright install --with-deps chromium
+          node e2e.mjs

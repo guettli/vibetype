@@ -1,0 +1,367 @@
+// Package store is the SQLite persistence layer of vibetype.
+package store
+
+import (
+	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"time"
+
+	_ "modernc.org/sqlite" // CGO-free SQLite driver
+)
+
+// ErrNotFound is returned when a row does not exist.
+var ErrNotFound = errors.New("not found")
+
+// ErrForbidden is returned when a row belongs to another user.
+var ErrForbidden = errors.New("forbidden")
+
+const schema = `
+CREATE TABLE IF NOT EXISTS users (
+	id           TEXT PRIMARY KEY,
+	display_name TEXT NOT NULL,
+	created_at   DATETIME NOT NULL
+);
+CREATE TABLE IF NOT EXISTS passkeys (
+	id         TEXT PRIMARY KEY,               -- base64url credential ID
+	user_id    TEXT NOT NULL REFERENCES users(id),
+	public_key BLOB NOT NULL,
+	sign_count INTEGER NOT NULL,
+	credential BLOB NOT NULL,                  -- full webauthn.Credential as JSON (flags, transports, ...)
+	created_at DATETIME NOT NULL
+);
+CREATE INDEX IF NOT EXISTS passkeys_user ON passkeys(user_id);
+CREATE TABLE IF NOT EXISTS texts (
+	id         TEXT PRIMARY KEY,
+	creator_id TEXT NOT NULL REFERENCES users(id),
+	title      TEXT NOT NULL,
+	content    TEXT NOT NULL,
+	created_at DATETIME NOT NULL
+);
+CREATE INDEX IF NOT EXISTS texts_creator ON texts(creator_id, created_at);
+CREATE TABLE IF NOT EXISTS typing_sessions (
+	id          TEXT PRIMARY KEY,
+	text_id     TEXT NOT NULL REFERENCES texts(id),
+	user_id     TEXT NOT NULL REFERENCES users(id),
+	cursor_pos  INTEGER NOT NULL,
+	error_count INTEGER NOT NULL,
+	cpm         INTEGER NOT NULL,
+	started_at  DATETIME NOT NULL,
+	updated_at  DATETIME NOT NULL,
+	finished_at DATETIME
+);
+CREATE INDEX IF NOT EXISTS typing_sessions_text ON typing_sessions(text_id, updated_at);
+-- login sessions (HTTP-only cookie); only the SHA-256 of the token is stored
+CREATE TABLE IF NOT EXISTS auth_sessions (
+	token_hash TEXT PRIMARY KEY,
+	user_id    TEXT NOT NULL REFERENCES users(id),
+	created_at DATETIME NOT NULL,
+	expires_at DATETIME NOT NULL
+);
+`
+
+// Store wraps the database.
+type Store struct {
+	db  *sql.DB
+	now func() time.Time
+}
+
+// Open opens (and migrates) the SQLite database at path in WAL mode.
+func Open(path string) (*Store, error) {
+	dsn := "file:" + path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=synchronous(NORMAL)"
+	db, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("open %s: %w", path, err)
+	}
+	if _, err := db.Exec(schema); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate %s: %w", path, err)
+	}
+	return &Store{db: db, now: func() time.Time { return time.Now().UTC() }}, nil
+}
+
+// Close closes the database.
+func (s *Store) Close() error { return s.db.Close() }
+
+// NewID returns a random UUIDv4 string.
+func NewID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		panic(err) // crypto/rand never fails on supported platforms
+	}
+	b[6] = b[6]&0x0f | 0x40
+	b[8] = b[8]&0x3f | 0x80
+	h := hex.EncodeToString(b[:])
+	return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:]
+}
+
+// slugAlphabet avoids ambiguous characters (0/o, 1/l/i) so codes can be read aloud.
+const slugAlphabet = "abcdefghjkmnpqrstuvwxyz23456789"
+
+func newSlug() string {
+	var b [6]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		panic(err)
+	}
+	for i := range b {
+		b[i] = slugAlphabet[int(b[i])%len(slugAlphabet)]
+	}
+	return string(b[:])
+}
+
+// ---- users & passkeys ----
+
+type User struct {
+	ID          string    `json:"id"`
+	DisplayName string    `json:"display_name"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
+type Passkey struct {
+	ID         string
+	UserID     string
+	PublicKey  []byte
+	SignCount  uint32
+	Credential []byte // JSON
+}
+
+// CreateUserWithPasskey inserts a user and its first passkey atomically.
+func (s *Store) CreateUserWithPasskey(ctx context.Context, u User, pk Passkey) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	now := s.now()
+	if _, err := tx.ExecContext(ctx, `INSERT INTO users(id, display_name, created_at) VALUES(?,?,?)`, u.ID, u.DisplayName, now); err != nil {
+		return fmt.Errorf("insert user: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO passkeys(id, user_id, public_key, sign_count, credential, created_at) VALUES(?,?,?,?,?,?)`,
+		pk.ID, u.ID, pk.PublicKey, pk.SignCount, pk.Credential, now); err != nil {
+		return fmt.Errorf("insert passkey: %w", err)
+	}
+	return tx.Commit()
+}
+
+func (s *Store) GetUser(ctx context.Context, id string) (User, error) {
+	var u User
+	err := s.db.QueryRowContext(ctx, `SELECT id, display_name, created_at FROM users WHERE id=?`, id).Scan(&u.ID, &u.DisplayName, &u.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return u, ErrNotFound
+	}
+	return u, err
+}
+
+func (s *Store) PasskeysForUser(ctx context.Context, userID string) ([]Passkey, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, user_id, public_key, sign_count, credential FROM passkeys WHERE user_id=?`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Passkey
+	for rows.Next() {
+		var p Passkey
+		if err := rows.Scan(&p.ID, &p.UserID, &p.PublicKey, &p.SignCount, &p.Credential); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) UpdatePasskey(ctx context.Context, pk Passkey) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE passkeys SET sign_count=?, credential=? WHERE id=?`, pk.SignCount, pk.Credential, pk.ID)
+	if err != nil {
+		return err
+	}
+	return mustAffectOne(res)
+}
+
+// ---- auth sessions ----
+
+func hashToken(token string) string {
+	h := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(h[:])
+}
+
+// CreateAuthSession returns a new random session token for userID.
+func (s *Store) CreateAuthSession(ctx context.Context, userID string, ttl time.Duration) (string, error) {
+	var b [32]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", err
+	}
+	token := hex.EncodeToString(b[:])
+	now := s.now()
+	_, err := s.db.ExecContext(ctx, `INSERT INTO auth_sessions(token_hash, user_id, created_at, expires_at) VALUES(?,?,?,?)`,
+		hashToken(token), userID, now, now.Add(ttl))
+	return token, err
+}
+
+// UserForToken resolves a session token; ErrNotFound if unknown or expired.
+func (s *Store) UserForToken(ctx context.Context, token string) (User, error) {
+	var u User
+	err := s.db.QueryRowContext(ctx, `SELECT u.id, u.display_name, u.created_at FROM auth_sessions a JOIN users u ON u.id=a.user_id
+		WHERE a.token_hash=? AND a.expires_at > ?`, hashToken(token), s.now()).Scan(&u.ID, &u.DisplayName, &u.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return u, ErrNotFound
+	}
+	return u, err
+}
+
+func (s *Store) DeleteAuthSession(ctx context.Context, token string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM auth_sessions WHERE token_hash=?`, hashToken(token))
+	return err
+}
+
+// ---- texts ----
+
+type Text struct {
+	ID          string    `json:"id"`
+	CreatorID   string    `json:"creator_id"`
+	CreatorName string    `json:"creator_name"`
+	Title       string    `json:"title"`
+	Content     string    `json:"content"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
+// CreateText stores a text (content must already be normalized) under a fresh slug.
+func (s *Store) CreateText(ctx context.Context, creatorID, title, content string) (Text, error) {
+	t := Text{CreatorID: creatorID, Title: title, Content: content, CreatedAt: s.now()}
+	for range 10 {
+		t.ID = newSlug()
+		_, err := s.db.ExecContext(ctx, `INSERT INTO texts(id, creator_id, title, content, created_at) VALUES(?,?,?,?,?)`,
+			t.ID, t.CreatorID, t.Title, t.Content, t.CreatedAt)
+		if err == nil {
+			return t, nil
+		}
+		var exists int
+		if qerr := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM texts WHERE id=?`, t.ID).Scan(&exists); qerr != nil || exists == 0 {
+			return t, fmt.Errorf("insert text: %w", err)
+		}
+		// slug collision: retry with a new slug
+	}
+	return t, errors.New("insert text: could not find a free slug")
+}
+
+func (s *Store) GetText(ctx context.Context, id string) (Text, error) {
+	var t Text
+	err := s.db.QueryRowContext(ctx, `SELECT t.id, t.creator_id, u.display_name, t.title, t.content, t.created_at
+		FROM texts t JOIN users u ON u.id=t.creator_id WHERE t.id=?`, id).
+		Scan(&t.ID, &t.CreatorID, &t.CreatorName, &t.Title, &t.Content, &t.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return t, ErrNotFound
+	}
+	return t, err
+}
+
+func (s *Store) TextsByCreator(ctx context.Context, creatorID string) ([]Text, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT t.id, t.creator_id, u.display_name, t.title, t.content, t.created_at
+		FROM texts t JOIN users u ON u.id=t.creator_id WHERE t.creator_id=? ORDER BY t.created_at DESC`, creatorID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Text{}
+	for rows.Next() {
+		var t Text
+		if err := rows.Scan(&t.ID, &t.CreatorID, &t.CreatorName, &t.Title, &t.Content, &t.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// ---- typing sessions ----
+
+type TypingSession struct {
+	ID         string     `json:"id"`
+	TextID     string     `json:"text_id"`
+	UserID     string     `json:"user_id"`
+	UserName   string     `json:"user_name"`
+	CursorPos  int        `json:"cursor_pos"`
+	ErrorCount int        `json:"error_count"`
+	CPM        int        `json:"cpm"`
+	StartedAt  time.Time  `json:"started_at"`
+	UpdatedAt  time.Time  `json:"updated_at"`
+	FinishedAt *time.Time `json:"finished_at"`
+}
+
+// UpsertTypingSession creates or updates a typing session owned by ts.UserID.
+// Progress never goes backwards: cursor_pos and error_count keep their maximum,
+// because sync requests may arrive out of order after a network outage.
+// updated_at is always set to the server time.
+func (s *Store) UpsertTypingSession(ctx context.Context, ts TypingSession) (TypingSession, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return ts, err
+	}
+	defer tx.Rollback()
+	var owner, textID string
+	err = tx.QueryRowContext(ctx, `SELECT user_id, text_id FROM typing_sessions WHERE id=?`, ts.ID).Scan(&owner, &textID)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+	case err != nil:
+		return ts, err
+	case owner != ts.UserID || textID != ts.TextID:
+		return ts, ErrForbidden
+	}
+	ts.UpdatedAt = s.now()
+	_, err = tx.ExecContext(ctx, `INSERT INTO typing_sessions(id, text_id, user_id, cursor_pos, error_count, cpm, started_at, updated_at, finished_at)
+		VALUES(?,?,?,?,?,?,?,?,?)
+		ON CONFLICT(id) DO UPDATE SET
+			cpm         = CASE WHEN excluded.cursor_pos >= cursor_pos THEN excluded.cpm ELSE cpm END,
+			cursor_pos  = MAX(cursor_pos, excluded.cursor_pos),
+			error_count = MAX(error_count, excluded.error_count),
+			updated_at  = excluded.updated_at,
+			finished_at = COALESCE(finished_at, excluded.finished_at)`,
+		ts.ID, ts.TextID, ts.UserID, ts.CursorPos, ts.ErrorCount, ts.CPM, ts.StartedAt, ts.UpdatedAt, ts.FinishedAt)
+	if err != nil {
+		return ts, fmt.Errorf("upsert typing session: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return ts, err
+	}
+	return ts, nil
+}
+
+// TypingSessionsForText lists the most recently updated sessions of a text.
+func (s *Store) TypingSessionsForText(ctx context.Context, textID string, limit int) ([]TypingSession, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT s.id, s.text_id, s.user_id, u.display_name, s.cursor_pos, s.error_count, s.cpm,
+			s.started_at, s.updated_at, s.finished_at
+		FROM typing_sessions s JOIN users u ON u.id=s.user_id
+		WHERE s.text_id=? ORDER BY s.updated_at DESC LIMIT ?`, textID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []TypingSession{}
+	for rows.Next() {
+		var ts TypingSession
+		var fin sql.NullTime
+		if err := rows.Scan(&ts.ID, &ts.TextID, &ts.UserID, &ts.UserName, &ts.CursorPos, &ts.ErrorCount, &ts.CPM,
+			&ts.StartedAt, &ts.UpdatedAt, &fin); err != nil {
+			return nil, err
+		}
+		if fin.Valid {
+			ts.FinishedAt = &fin.Time
+		}
+		out = append(out, ts)
+	}
+	return out, rows.Err()
+}
+
+func mustAffectOne(res sql.Result) error {
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n != 1 {
+		return ErrNotFound
+	}
+	return nil
+}
