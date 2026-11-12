@@ -29,15 +29,21 @@ const (
 	maxTitleLen   = 200
 	maxContentLen = 20000
 	maxNameLen    = 64
+
+	maxCPM               = 3000 // world records are around 1000-1300 cpm
+	maxSessionsPerText   = 50   // per user and text
+	maxPendingCeremonies = 10000
+	maxWebAuthnBodyBytes = 64 << 10
 )
 
 // Config configures the server.
 type Config struct {
-	RPID   string // e.g. vibetype.thomas-guettler.de
-	Origin string // e.g. https://vibetype.thomas-guettler.de
-	Static fs.FS  // frontend assets (index.html, app.js, ...)
-	Logger *slog.Logger
-	Store  *store.Store
+	Version string // shown by /healthz
+	RPID    string // e.g. vibetype.thomas-guettler.de
+	Origin  string // e.g. https://vibetype.thomas-guettler.de
+	Static  fs.FS  // frontend assets (index.html, app.js, ...)
+	Logger  *slog.Logger
+	Store   *store.Store
 }
 
 // Server implements http.Handler.
@@ -79,6 +85,14 @@ func New(cfg Config) (*Server, error) {
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// CSRF protection: every state-changing request must come from our own origin.
+	// SameSite=Lax alone is not enough, sibling subdomains count as same-site.
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		if origin := r.Header.Get("Origin"); origin != s.cfg.Origin {
+			httpError(w, http.StatusForbidden, fmt.Sprintf("cross-origin request refused (Origin %q)", origin))
+			return
+		}
+	}
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Referrer-Policy", "same-origin")
 	w.Header().Set("Content-Security-Policy", "default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self' data:; frame-ancestors 'none'")
@@ -87,7 +101,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) routes() {
 	m := s.mux
-	m.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok\n")) })
+	m.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { fmt.Fprintf(w, "ok %s\n", s.cfg.Version) })
 
 	m.HandleFunc("POST /api/register/begin", s.registerBegin)
 	m.HandleFunc("POST /api/register/finish", s.registerFinish)
@@ -159,6 +173,10 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 }
 
 func readJSON(w http.ResponseWriter, r *http.Request, v any) bool {
+	if ct := r.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		httpError(w, http.StatusUnsupportedMediaType, "Content-Type must be application/json")
+		return false
+	}
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 256<<10))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(v); err != nil {
@@ -217,6 +235,10 @@ func (s *Server) createText(w http.ResponseWriter, r *http.Request) {
 		return
 	case utf8.RuneCountInString(content) > maxContentLen:
 		httpError(w, http.StatusBadRequest, fmt.Sprintf("content longer than %d characters", maxContentLen))
+		return
+	}
+	if bad := textnorm.Untypable(content); len(bad) > 0 {
+		httpError(w, http.StatusBadRequest, fmt.Sprintf("content contains characters that cannot be typed on a keyboard: %q", string(bad)))
 		return
 	}
 	u := userFrom(r.Context())
@@ -294,19 +316,33 @@ func (s *Server) syncSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	n := utf8.RuneCountInString(t.Content)
-	if in.CursorPos < 0 || in.CursorPos > n || in.ErrorCount < 0 || in.CPM < 0 || in.StartedAt.IsZero() {
+	now := time.Now()
+	switch {
+	case in.CursorPos < 0 || in.CursorPos > n || in.ErrorCount < 0:
 		httpError(w, http.StatusBadRequest, "invalid progress values")
 		return
-	}
-	if in.FinishedAt != nil && in.CursorPos != n {
+	case in.CPM < 0 || in.CPM > maxCPM:
+		httpError(w, http.StatusBadRequest, fmt.Sprintf("cpm must be between 0 and %d", maxCPM))
+		return
+	case in.StartedAt.IsZero() || in.StartedAt.After(now.Add(time.Minute)):
+		httpError(w, http.StatusBadRequest, "started_at missing or in the future")
+		return
+	case in.FinishedAt != nil && in.CursorPos != n:
 		httpError(w, http.StatusBadRequest, "finished_at set but text not completed")
+		return
+	case in.FinishedAt != nil && (in.FinishedAt.Before(in.StartedAt) || in.FinishedAt.After(now.Add(time.Minute))):
+		httpError(w, http.StatusBadRequest, "finished_at before started_at or in the future")
 		return
 	}
 	ts, err := s.cfg.Store.UpsertTypingSession(r.Context(), store.TypingSession{
 		ID: id, TextID: t.ID, UserID: userFrom(r.Context()).ID,
 		CursorPos: in.CursorPos, ErrorCount: in.ErrorCount, CPM: in.CPM,
 		StartedAt: in.StartedAt.UTC(), FinishedAt: utcPtr(in.FinishedAt),
-	})
+	}, maxSessionsPerText)
+	if errors.Is(err, store.ErrLimit) {
+		httpError(w, http.StatusTooManyRequests, fmt.Sprintf("more than %d typing sessions on this text", maxSessionsPerText))
+		return
+	}
 	if errors.Is(err, store.ErrForbidden) {
 		httpError(w, http.StatusForbidden, "session belongs to another user or text")
 		return
@@ -324,4 +360,25 @@ func utcPtr(t *time.Time) *time.Time {
 	}
 	u := t.UTC()
 	return &u
+}
+
+// RunJanitor periodically drops expired passkey ceremonies and login sessions
+// until ctx is done.
+func (s *Server) RunJanitor(ctx context.Context, every time.Duration) {
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		s.sweepCeremonies()
+		n, err := s.cfg.Store.DeleteExpiredAuthSessions(ctx)
+		if err != nil && ctx.Err() == nil {
+			s.cfg.Logger.Error("delete expired login sessions", "err", err)
+		} else if n > 0 {
+			s.cfg.Logger.Info("deleted expired login sessions", "count", n)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
 }

@@ -20,6 +20,9 @@ var ErrNotFound = errors.New("not found")
 // ErrForbidden is returned when a row belongs to another user.
 var ErrForbidden = errors.New("forbidden")
 
+// ErrLimit is returned when a per-user quota is exhausted.
+var ErrLimit = errors.New("limit reached")
+
 const schema = `
 CREATE TABLE IF NOT EXISTS users (
 	id           TEXT PRIMARY KEY,
@@ -72,7 +75,10 @@ type Store struct {
 
 // Open opens (and migrates) the SQLite database at path in WAL mode.
 func Open(path string) (*Store, error) {
-	dsn := "file:" + path + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=synchronous(NORMAL)"
+	// _txlock=immediate: a deferred transaction that reads first and writes later
+	// cannot wait for the write lock in WAL mode and fails with SQLITE_BUSY at once
+	// under concurrent syncs. IMMEDIATE takes the lock up front and honours busy_timeout.
+	dsn := "file:" + path + "?_txlock=immediate&_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=synchronous(NORMAL)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", path, err)
@@ -212,6 +218,15 @@ func (s *Store) UserForToken(ctx context.Context, token string) (User, error) {
 	return u, err
 }
 
+// DeleteExpiredAuthSessions removes expired logins and returns how many were deleted.
+func (s *Store) DeleteExpiredAuthSessions(ctx context.Context) (int64, error) {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM auth_sessions WHERE expires_at <= ?`, s.now())
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
 func (s *Store) DeleteAuthSession(ctx context.Context, token string) error {
 	_, err := s.db.ExecContext(ctx, `DELETE FROM auth_sessions WHERE token_hash=?`, hashToken(token))
 	return err
@@ -295,7 +310,9 @@ type TypingSession struct {
 // Progress never goes backwards: cursor_pos and error_count keep their maximum,
 // because sync requests may arrive out of order after a network outage.
 // updated_at is always set to the server time.
-func (s *Store) UpsertTypingSession(ctx context.Context, ts TypingSession) (TypingSession, error) {
+// A new session is refused with ErrLimit if the user already has maxPerUser
+// sessions on this text (0 = unlimited).
+func (s *Store) UpsertTypingSession(ctx context.Context, ts TypingSession, maxPerUser int) (TypingSession, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return ts, err
@@ -309,6 +326,15 @@ func (s *Store) UpsertTypingSession(ctx context.Context, ts TypingSession) (Typi
 		return ts, err
 	case owner != ts.UserID || textID != ts.TextID:
 		return ts, ErrForbidden
+	}
+	if errors.Is(err, sql.ErrNoRows) && maxPerUser > 0 {
+		var n int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM typing_sessions WHERE text_id=? AND user_id=?`, ts.TextID, ts.UserID).Scan(&n); err != nil {
+			return ts, err
+		}
+		if n >= maxPerUser {
+			return ts, ErrLimit
+		}
 	}
 	ts.UpdatedAt = s.now()
 	_, err = tx.ExecContext(ctx, `INSERT INTO typing_sessions(id, text_id, user_id, cursor_pos, error_count, cpm, started_at, updated_at, finished_at)

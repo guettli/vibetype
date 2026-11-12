@@ -1,4 +1,4 @@
-name: ci
+name: CI
 on:
   push:
     branches: [main]
@@ -24,3 +24,11 @@ jobs:
           ./vibetype -addr :8099 -origin http://localhost:8099 -db "$RUNNER_TEMP/e2e.db" &
           cd e2e && npm install && npx playwright install --with-deps chromium
           node e2e.mjs
+      - name: docker build
+        run: docker build -t vibetype:ci .
+      - name: docker smoke test (nonroot can create the DB in /data)
+        run: |
+          docker run -d --name vt -p 8098:8080 -e VIBETYPE_ORIGIN=http://localhost:8098 vibetype:ci
+          for i in $(seq 1 20); do curl -fsS http://localhost:8098/healthz && break; sleep 1; done
+          curl -fsS http://localhost:8098/healthz
+          docker logs vt

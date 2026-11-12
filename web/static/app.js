@@ -9,16 +9,31 @@ const $app = document.getElementById('app');
 const $status = document.getElementById('status');
 const $user = document.getElementById('user');
 
-// ---------- localStorage helpers (texts, me, current sessions, sync queue) ----------
+// ---------- localStorage helpers ----------
+// `vt:me` is global; texts, typing sessions and the sync queue live under
+// `vt:u:<user id>:` so that two accounts on a shared classroom PC never see or
+// sync each other's data.
 
-const ls = {
+let me = null;
+
+const store = (prefix) => ({
   get(key, def = null) {
-    const raw = localStorage.getItem('vt:' + key);
+    const raw = localStorage.getItem(prefix() + key);
     return raw === null ? def : JSON.parse(raw);
   },
-  set(key, value) { localStorage.setItem('vt:' + key, JSON.stringify(value)); },
-  del(key) { localStorage.removeItem('vt:' + key); },
-};
+  set(key, value) { localStorage.setItem(prefix() + key, JSON.stringify(value)); },
+  del(key) { localStorage.removeItem(prefix() + key); },
+});
+const ls = store(() => 'vt:');
+const us = store(() => {
+  if (!me) throw new Error('user storage used without login');
+  return `vt:u:${me.id}:`;
+});
+
+function clearUserStorage(userId) {
+  const prefix = `vt:u:${userId}:`;
+  for (const k of Object.keys(localStorage)) if (k.startsWith(prefix)) localStorage.removeItem(k);
+}
 
 // ---------- tiny DOM helper ----------
 
@@ -55,7 +70,8 @@ async function api(method, path, body) {
   return data;
 }
 
-const isOffline = (err) => !(err instanceof ApiError); // fetch threw: network down
+// fetch threw (network down), or the reverse proxy reports the backend as unavailable
+const isOffline = (err) => !(err instanceof ApiError) || [502, 503, 504].includes(err.status);
 
 // ---------- status bar ----------
 
@@ -67,7 +83,7 @@ function renderStatus() {
     $status.append(h('span', { class: 'bad' }, status.error, ' ',
       h('button', { class: 'link', onclick: () => { status.error = null; renderStatus(); } }, '×')));
   }
-  const pending = Object.keys(ls.get('pending', {})).length;
+  const pending = me ? Object.keys(us.get('pending', {})).length : 0;
   if (status.sync === 'offline') $status.append(h('span', { class: 'warn' }, `offline – ${pending} Stand/Stände warten auf Sync`));
   else if (status.sync === 'unauthorized') $status.append(h('span', { class: 'bad' }, 'Anmeldung abgelaufen – bitte neu anmelden, damit der Fortschritt synchronisiert wird'));
   else if (pending) $status.append(h('span', { class: 'muted' }, 'synchronisiere …'));
@@ -83,17 +99,17 @@ function fail(msg) {
 // never holds more than one entry per session, even after a long offline phase.
 
 function enqueue(state) {
-  const pending = ls.get('pending', {});
+  const pending = us.get('pending', {});
   pending[state.id] = syncPayload(state, Date.now());
-  ls.set('pending', pending);
+  us.set('pending', pending);
 }
 
 let syncing = false;
 async function flush() {
-  if (syncing) return;
+  if (syncing || !me) return;
   syncing = true;
   try {
-    const pending = ls.get('pending', {});
+    const pending = us.get('pending', {});
     for (const [id, payload] of Object.entries(pending)) {
       let rejected = false;
       try {
@@ -102,16 +118,16 @@ async function flush() {
       } catch (err) {
         if (isOffline(err)) { status.sync = 'offline'; break; }
         if (err.status === 401) { status.sync = 'unauthorized'; break; }
-        if (err.status >= 500) { fail(`Sync-Fehler auf dem Server (${err.status}): ${err.message}`); break; }
+        if (err.status >= 500 || err.status === 429) { fail(`Sync-Fehler auf dem Server (${err.status}): ${err.message}`); break; }
         // Permanent rejection (4xx): report loudly and drop, retrying cannot help.
         fail(`Sync abgelehnt (${err.status}): ${err.message}`);
         rejected = true;
       }
       // remove only if no newer state was queued meanwhile
-      const now = ls.get('pending', {});
+      const now = us.get('pending', {});
       if (rejected || JSON.stringify(now[id]) === JSON.stringify(payload)) {
         delete now[id];
-        ls.set('pending', now);
+        us.set('pending', now);
       }
     }
   } finally {
@@ -172,29 +188,41 @@ async function loginPasskey() {
   });
 }
 
-let me = null;
-
 async function loadMe() {
   try {
     me = await api('GET', '/api/me');
     ls.set('me', me);
   } catch (err) {
-    if (isOffline(err)) me = ls.get('me'); // offline: trust the last known login
-    else { me = null; ls.del('me'); }
+    if (err.status === 401) { me = null; ls.del('me'); }
+    else {
+      // offline or server trouble: keep working with the last known login
+      me = ls.get('me');
+      if (!isOffline(err)) fail(`Server-Fehler beim Laden des Benutzers: ${err.message}`);
+    }
   }
   renderUser();
+}
+
+async function logout() {
+  await flush();
+  const pending = Object.keys(us.get('pending', {})).length;
+  if (pending && !confirm(`${pending} Tipp-Stand/Stände sind noch nicht synchronisiert und gehen beim Abmelden verloren. Trotzdem abmelden?`)) return;
+  try { await api('POST', '/api/logout'); }
+  catch (err) {
+    if (!isOffline(err)) { fail(`Abmelden fehlgeschlagen: ${err.message}`); return; }
+    // offline: the server-side session stays valid until it expires, but this browser forgets it
+  }
+  clearUserStorage(me.id);
+  me = null;
+  ls.del('me');
+  renderUser();
+  route();
 }
 
 function renderUser() {
   $user.replaceChildren();
   if (!me) return;
-  $user.append(me.display_name, ' · ', h('button', {
-    class: 'link',
-    onclick: async () => {
-      try { await api('POST', '/api/logout'); } catch (err) { fail(`Abmelden fehlgeschlagen: ${err.message}`); return; }
-      me = null; ls.del('me'); renderUser(); route();
-    },
-  }, 'abmelden'));
+  $user.append(me.display_name, ' · ', h('button', { class: 'link', onclick: logout }, 'abmelden'));
 }
 
 function loginView() {
@@ -257,7 +285,7 @@ async function homeView() {
           e.preventDefault();
           try {
             const t = await api('POST', '/api/texts', { title: title.value, content: content.value });
-            ls.set('text:' + t.id, t);
+            us.set('text:' + t.id, t);
             navigate('/t/' + t.id);
           } catch (err) { fail(`Text konnte nicht gespeichert werden: ${err.message}`); }
         },
@@ -284,10 +312,10 @@ async function homeView() {
 async function loadText(id) {
   try {
     const t = await api('GET', '/api/texts/' + id);
-    ls.set('text:' + id, t);
+    us.set('text:' + id, t);
     return t;
   } catch (err) {
-    const cached = ls.get('text:' + id);
+    const cached = us.get('text:' + id);
     if (isOffline(err) && cached) return cached;
     throw err;
   }
@@ -305,8 +333,8 @@ async function typingView(textId) {
   }
   const textChars = chars(text.content);
   const stateKey = 'session:' + textId;
-  let state = ls.get(stateKey);
-  if (!state) { state = newSession(crypto.randomUUID(), textId); ls.set(stateKey, state); }
+  let state = us.get(stateKey);
+  if (!state) { state = newSession(crypto.randomUUID(), textId); us.set(stateKey, state); }
 
   const $done = h('span', { class: 'done' });
   const $cur = h('span', { class: 'cur' });
@@ -335,7 +363,7 @@ async function typingView(textId) {
   }
   function restart() {
     state = newSession(crypto.randomUUID(), textId);
-    ls.set(stateKey, state);
+    us.set(stateKey, state);
     render();
     $typing.focus();
   }
@@ -353,7 +381,7 @@ async function typingView(textId) {
     const result = press(state, textChars, ch, Date.now());
     if (result === 'ignored') return;
     if (result === 'error') flash();
-    ls.set(stateKey, state);
+    us.set(stateKey, state);
     enqueue(state); // dirty flag: picked up by the sync loop
     render();
     $cur.scrollIntoView({ block: 'nearest' });

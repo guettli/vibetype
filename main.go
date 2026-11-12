@@ -19,6 +19,9 @@ import (
 	"github.com/guettli/vibetype/web"
 )
 
+// version is set at build time: -ldflags "-X main.version=v0.0.1"
+var version = "dev"
+
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "vibetype:", err)
@@ -46,18 +49,26 @@ func run() error {
 	defer st.Close()
 
 	srv, err := server.New(server.Config{
-		RPID: u.Hostname(), Origin: *origin, Static: web.Static(), Logger: logger, Store: st,
+		Version: version, RPID: u.Hostname(), Origin: *origin, Static: web.Static(), Logger: logger, Store: st,
 	})
 	if err != nil {
 		return err
 	}
 
-	hs := &http.Server{Addr: *addr, Handler: srv, ReadHeaderTimeout: 10 * time.Second}
+	hs := &http.Server{
+		Addr:              *addr,
+		Handler:           srv,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	go srv.RunJanitor(ctx, time.Hour)
 	errc := make(chan error, 1)
 	go func() {
-		logger.Info("listening", "addr", *addr, "origin", *origin, "db", *dbPath)
+		logger.Info("listening", "version", version, "addr", *addr, "origin", *origin, "db", *dbPath)
 		errc <- hs.ListenAndServe()
 	}()
 	select {

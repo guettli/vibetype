@@ -17,3 +17,12 @@ func TestNormalize(t *testing.T) {
 		}
 	}
 }
+
+func TestUntypable(t *testing.T) {
+	if u := Untypable(Normalize("Grüße, 50 € & 20 °C – „ok“ §1")); len(u) != 0 {
+		t.Fatalf("unexpected untypable %q", string(u))
+	}
+	if u := string(Untypable("a😀b日😀")); u != "😀日" {
+		t.Fatalf("got %q", u)
+	}
+}

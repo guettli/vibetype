@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -61,6 +62,10 @@ func (e *env) do(token, method, path string, body any, out any) int {
 		rd = bytes.NewReader(b)
 	}
 	req, _ := http.NewRequest(method, e.ts.URL+path, rd)
+	req.Header.Set("Origin", "http://localhost:8080")
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	if token != "" {
 		req.AddCookie(&http.Cookie{Name: sessionCookie, Value: token})
 	}
@@ -185,5 +190,69 @@ func TestRegisterBegin(t *testing.T) {
 	}
 	if c := e.do("", "POST", "/api/register/finish", map[string]string{}, nil); c != 400 {
 		t.Fatalf("finish without ceremony: %d", c)
+	}
+}
+
+func TestHardening(t *testing.T) {
+	e := newEnv(t)
+	_, tok := e.login("Eve")
+
+	// cross-origin and non-JSON writes are refused
+	for _, tc := range []struct {
+		origin, ct string
+		want       int
+	}{
+		{"https://evil.thomas-guettler.de", "application/json", 403},
+		{"", "application/json", 403},
+		{"http://localhost:8080", "text/plain", 415},
+	} {
+		req, _ := http.NewRequest("POST", e.ts.URL+"/api/texts", bytes.NewReader([]byte(`{"title":"x","content":"y"}`)))
+		req.Header.Set("Content-Type", tc.ct)
+		if tc.origin != "" {
+			req.Header.Set("Origin", tc.origin)
+		}
+		req.AddCookie(&http.Cookie{Name: sessionCookie, Value: tok})
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res.Body.Close()
+		if res.StatusCode != tc.want {
+			t.Errorf("origin=%q ct=%q: got %d, want %d", tc.origin, tc.ct, res.StatusCode, tc.want)
+		}
+	}
+
+	var errResp struct{ Error string }
+	if c := e.do(tok, "POST", "/api/texts", map[string]string{"title": "x", "content": "Hallo 😀"}, &errResp); c != 400 {
+		t.Fatalf("emoji text: %d", c)
+	}
+	var txt store.Text
+	if c := e.do(tok, "POST", "/api/texts", map[string]string{"title": "x", "content": "abc"}, &txt); c != 201 {
+		t.Fatalf("create: %d", c)
+	}
+	start := time.Now().Add(-time.Minute)
+	put := func(id string, body map[string]any) int {
+		b := map[string]any{"text_id": txt.ID, "cursor_pos": 1, "error_count": 0, "cpm": 100, "started_at": start}
+		for k, v := range body {
+			b[k] = v
+		}
+		return e.do(tok, "PUT", "/api/sessions/"+id, b, nil)
+	}
+	if c := put(store.NewID(), map[string]any{"cpm": 99999}); c != 400 {
+		t.Errorf("absurd cpm: %d", c)
+	}
+	if c := put(store.NewID(), map[string]any{"started_at": time.Now().Add(time.Hour)}); c != 400 {
+		t.Errorf("future start: %d", c)
+	}
+	if c := put(store.NewID(), map[string]any{"cursor_pos": 3, "finished_at": start.Add(-time.Hour)}); c != 400 {
+		t.Errorf("finished before start: %d", c)
+	}
+	for i := range maxSessionsPerText {
+		if c := put(fmt.Sprintf("session-%03d", i), nil); c != 200 {
+			t.Fatalf("session %d: %d", i, c)
+		}
+	}
+	if c := put("session-too-many", nil); c != 429 {
+		t.Errorf("session limit: %d", c)
 	}
 }

@@ -38,11 +38,23 @@ Domainwechsel macht alle Passkeys ungültig. Statt Flags gehen auch die Umgebung
 über HTTPS oder `localhost`.
 
 Docker: `docker build -t vibetype . && docker run -p 8080:8080 -v vibetype:/data -e VIBETYPE_ORIGIN=... vibetype`
+(das Image läuft als uid 65532, `/data` gehört diesem Nutzer).
+
+`GET /healthz` antwortet mit `ok <version>`.
+
+## Release & Deployment
+
+* Jeder grüne CI-Lauf auf `main` erzeugt per [release.yml](.github/workflows/release.yml) den nächsten Tag
+  `v0.0.N` und das Image `ghcr.io/guettli/vibetype:v0.0.N`.
+* Produktiv läuft vibetype auf dem vps-Cluster, die Manifeste liegen in
+  [guettli/gitops](https://github.com/guettli/gitops) unter `k8s/plain/vps/vibetype/`. Renovate erhöht dort den
+  Image-Tag, Flux rollt aus. Es läuft ein einzelnes Replica mit `strategy: Recreate`, weil die SQLite-Datei auf einem
+  RWO-Volume liegt.
 
 ## Tests
 
 ```sh
-go test ./...                       # Normalisierung, API, Sync-Semantik, Rechte
+go test ./...                       # Normalisierung, API, Sync-Semantik, Rechte, CSRF, Limits, Nebenläufigkeit
 node --test web/test/*.test.mjs     # Tipp-Engine (Stop-on-Error, CPM, Genauigkeit)
 # E2E (Chromium mit virtuellem Passkey-Authenticator):
 go run . -addr :8099 -origin http://localhost:8099 -db /tmp/e2e.db &
@@ -63,22 +75,44 @@ go run . -addr :8099 -origin http://localhost:8099 -db /tmp/e2e.db &
 
 Beim Speichern wird normalisiert ([internal/textnorm](internal/textnorm/textnorm.go)): Unicode NFC, typografische
 Anführungszeichen, Gedankenstriche und Auslassungspunkte werden zu ASCII, Leerraum wird zusammengefasst, Leerzeilen
-fallen weg. Jedes Zeichen ist damit auf einer normalen Tastatur tippbar, ein Zeilenumbruch entspricht genau einem
-Enter. Positionen zählen in Unicode-Codepoints (Go-Runes = `Array.from()` in JS). Share-Slugs haben 6 Zeichen ohne
+fallen weg. Ein Zeilenumbruch entspricht genau einem Enter. Erlaubt sind danach nur Zeichen, die man auf einer
+deutschen oder US-Tastatur tippen kann (druckbares ASCII, Latin-1 wie ä ö ü ß é § °, dazu €). Texte mit anderen
+Zeichen (Emoji, CJK, …) werden mit einer Fehlermeldung abgelehnt, die die betroffenen Zeichen nennt. Positionen zählen in Unicode-Codepoints (Go-Runes = `Array.from()` in JS). Share-Slugs haben 6 Zeichen ohne
 verwechselbare Zeichen (kein 0/o, 1/l/i).
 
 ### Sync-Protokoll
 
 `PUT /api/sessions/{client-uuid}` mit `{text_id, cursor_pos, error_count, cpm, started_at, finished_at}`.
 
-* Die Queue (`vt:pending` in `localStorage`) hält pro Sitzung nur den letzten Stand (latest wins). Sie bleibt auch
+* Die Queue (`pending` in `localStorage`) hält pro Sitzung nur den letzten Stand (latest wins). Sie bleibt auch
   nach langer Offline-Phase klein.
+* Alle Offline-Daten (Texte, Sitzungen, Queue) liegen unter `vt:u:<user-id>:`. Auf einem geteilten PC im Kursraum
+  sieht oder synchronisiert ein Account nie die Daten eines anderen. Beim Abmelden wird zuerst synchronisiert; ist
+  dann noch etwas offen, fragt die App nach. Danach werden die Daten des Nutzers gelöscht.
 * Der Server ist idempotent und monoton: `cursor_pos` und `error_count` können nicht sinken, `finished_at` wird nur
-  einmal gesetzt. Reihenfolge und Wiederholung von Requests sind deshalb egal. `updated_at` ist immer Serverzeit.
-* Der Server prüft: Sitzung gehört dem Nutzer und dem Text, `cursor_pos ≤ Textlänge`, `finished_at` nur am Textende.
-* Fehlerverhalten: Netzwerkfehler → „offline“, erneuter Versuch. 401 → Hinweis „neu anmelden“, Stand bleibt erhalten.
-  5xx → Fehlermeldung, erneuter Versuch. Andere 4xx → Fehlermeldung, der Stand wird verworfen (ein erneuter Versuch
-  kann nicht helfen).
+  einmal gesetzt. Doppelte oder vertauschte Requests verfälschen den Fortschritt deshalb nicht. `cpm` übernimmt der
+  Server nur aus Requests, deren `cursor_pos` nicht kleiner als der gespeicherte Wert ist. `updated_at` ist immer
+  Serverzeit.
+* Der Server prüft: Sitzung gehört dem Nutzer und dem Text, `cursor_pos ≤ Textlänge`, `cpm ≤ 3000`, `started_at`
+  liegt nicht in der Zukunft, `finished_at` nur am Textende und nach `started_at`, höchstens 50 Sitzungen pro Nutzer
+  und Text (sonst 429).
+* Fehlerverhalten: Netzwerkfehler sowie 502/503/504 vom Reverse-Proxy (Backend startet neu) → „offline“, erneuter
+  Versuch. 401 → Hinweis „neu anmelden“, Stand bleibt erhalten. Andere 5xx und 429 → Fehlermeldung, erneuter Versuch.
+  Andere 4xx → Fehlermeldung, der Stand wird verworfen (ein erneuter Versuch kann nicht helfen).
+* Liefert der Proxy bei einem Seitenaufruf 5xx, antwortet der Service Worker mit der gecachten App-Shell.
+
+### Sicherheit
+
+* Passkeys mit `residentKey: required` und `userVerification: required` (PIN/Biometrie). Ein Login wird abgelehnt,
+  wenn go-webauthn eine Clone-Warnung meldet (Signaturzähler läuft rückwärts).
+* CSRF: Jeder nicht-GET-Request muss einen `Origin`-Header haben, der genau `-origin` entspricht. JSON-Endpunkte
+  verlangen `Content-Type: application/json`. `SameSite=Lax` allein reicht nicht, weil andere Subdomains von
+  thomas-guettler.de als „same-site“ gelten.
+* Gegen Speicher-DoS: Laufende Passkey-Zeremonien sind auf 10 000 begrenzt (danach 503), WebAuthn-Bodys auf 64 KiB,
+  JSON-Bodys auf 256 KiB. Server-Timeouts sind gesetzt. Abgelaufene Zeremonien und Logins räumt stündlich ein
+  Janitor ab.
+* Fehlerdetails aus go-webauthn landen nur im Server-Log, nicht in der API-Antwort.
+* CSP `default-src 'self'`, keine Inline-Skripte oder -Styles.
 
 ### Live-Ansicht
 

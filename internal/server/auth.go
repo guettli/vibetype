@@ -46,23 +46,41 @@ func toPasskey(c *webauthn.Credential, userID string) (store.Passkey, error) {
 
 // ---- ceremony state (in memory; a ceremony lives only a few minutes) ----
 
-func (s *Server) putCeremony(w http.ResponseWriter, c ceremony) {
+// putCeremony stores the state of a started passkey ceremony. It returns false
+// (and answers 503) if too many ceremonies are pending, which bounds the memory
+// an unauthenticated client can make us hold.
+func (s *Server) putCeremony(w http.ResponseWriter, c ceremony) bool {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		panic(err)
 	}
 	key := hex.EncodeToString(b[:])
-	now := time.Now()
-	c.expires = now.Add(ceremonyTTL)
+	c.expires = time.Now().Add(ceremonyTTL)
 	s.mu.Lock()
-	for k, v := range s.ceremonies { // garbage-collect expired ceremonies
+	full := len(s.ceremonies) >= maxPendingCeremonies
+	if !full {
+		s.ceremonies[key] = c
+	}
+	s.mu.Unlock()
+	if full {
+		s.cfg.Logger.Warn("too many pending passkey ceremonies", "limit", maxPendingCeremonies)
+		httpError(w, http.StatusServiceUnavailable, "too many sign-ins in progress, please retry in a few minutes")
+		return false
+	}
+	s.setCookie(w, ceremonyCookie, key, ceremonyTTL)
+	return true
+}
+
+// sweepCeremonies removes expired ceremonies; called periodically.
+func (s *Server) sweepCeremonies() {
+	now := time.Now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for k, v := range s.ceremonies {
 		if now.After(v.expires) {
 			delete(s.ceremonies, k)
 		}
 	}
-	s.ceremonies[key] = c
-	s.mu.Unlock()
-	s.setCookie(w, ceremonyCookie, key, ceremonyTTL)
 }
 
 func (s *Server) takeCeremony(w http.ResponseWriter, r *http.Request) (ceremony, bool) {
@@ -103,14 +121,16 @@ func (s *Server) registerBegin(w http.ResponseWriter, r *http.Request) {
 		webauthn.WithAuthenticatorSelection(protocol.AuthenticatorSelection{
 			ResidentKey:        protocol.ResidentKeyRequirementRequired,
 			RequireResidentKey: protocol.ResidentKeyRequired(),
-			UserVerification:   protocol.VerificationPreferred,
+			UserVerification:   protocol.VerificationRequired,
 		}),
 	)
 	if err != nil {
 		s.internal(w, r, err)
 		return
 	}
-	s.putCeremony(w, ceremony{data: *data, user: u})
+	if !s.putCeremony(w, ceremony{data: *data, user: u}) {
+		return
+	}
 	writeJSON(w, http.StatusOK, opts)
 }
 
@@ -123,9 +143,11 @@ func (s *Server) registerFinish(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "not a registration ceremony")
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxWebAuthnBodyBytes)
 	cred, err := s.wa.FinishRegistration(c.user, c.data, r)
 	if err != nil {
-		httpError(w, http.StatusBadRequest, "passkey registration failed: "+describe(err))
+		s.cfg.Logger.Info("passkey registration failed", "err", describe(err))
+		httpError(w, http.StatusBadRequest, "passkey registration failed")
 		return
 	}
 	pk, err := toPasskey(cred, c.user.id)
@@ -143,12 +165,14 @@ func (s *Server) registerFinish(w http.ResponseWriter, r *http.Request) {
 // ---- login (discoverable credentials / passkeys) ----
 
 func (s *Server) loginBegin(w http.ResponseWriter, r *http.Request) {
-	opts, data, err := s.wa.BeginDiscoverableLogin(webauthn.WithUserVerification(protocol.VerificationPreferred))
+	opts, data, err := s.wa.BeginDiscoverableLogin(webauthn.WithUserVerification(protocol.VerificationRequired))
 	if err != nil {
 		s.internal(w, r, err)
 		return
 	}
-	s.putCeremony(w, ceremony{data: *data})
+	if !s.putCeremony(w, ceremony{data: *data}) {
+		return
+	}
 	writeJSON(w, http.StatusOK, opts)
 }
 
@@ -167,16 +191,24 @@ func (s *Server) loginFinish(w http.ResponseWriter, r *http.Request) {
 		lookupErr = err
 		return u, err
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxWebAuthnBodyBytes)
 	user, cred, err := s.wa.FinishPasskeyLogin(handler, c.data, r)
 	if err != nil {
 		if lookupErr != nil && !errors.Is(lookupErr, store.ErrNotFound) {
 			s.internal(w, r, lookupErr)
 			return
 		}
-		httpError(w, http.StatusUnauthorized, "passkey login failed: "+describe(err))
+		s.cfg.Logger.Info("passkey login failed", "err", describe(err))
+		httpError(w, http.StatusUnauthorized, "passkey login failed")
 		return
 	}
 	wu := user.(*waUser)
+	if cred.Authenticator.CloneWarning {
+		// The signature counter went backwards: the credential may have been cloned.
+		s.cfg.Logger.Error("passkey clone warning, login refused", "user", wu.id, "credential", credentialID(cred.ID))
+		httpError(w, http.StatusUnauthorized, "passkey login refused: signature counter mismatch (possible cloned authenticator)")
+		return
+	}
 	pk, err := toPasskey(cred, wu.id)
 	if err != nil {
 		s.internal(w, r, err)
