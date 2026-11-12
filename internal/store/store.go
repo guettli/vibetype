@@ -7,8 +7,10 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	_ "modernc.org/sqlite" // CGO-free SQLite driver
@@ -40,7 +42,8 @@ CREATE TABLE IF NOT EXISTS texts (
 	creator_id TEXT NOT NULL REFERENCES users(id),
 	title      TEXT NOT NULL,
 	content    TEXT NOT NULL,
-	created_at DATETIME NOT NULL
+	created_at DATETIME NOT NULL,
+	kind       TEXT NOT NULL DEFAULT '' -- '' = written by the user, 'practice' = generated for weak keys
 );
 CREATE INDEX IF NOT EXISTS texts_creator ON texts(creator_id, created_at);
 CREATE TABLE IF NOT EXISTS typing_sessions (
@@ -52,7 +55,8 @@ CREATE TABLE IF NOT EXISTS typing_sessions (
 	cpm         INTEGER NOT NULL,
 	started_at  DATETIME NOT NULL,
 	updated_at  DATETIME NOT NULL,
-	finished_at DATETIME
+	finished_at DATETIME,
+	key_errors  TEXT NOT NULL DEFAULT '{}' -- JSON: expected character -> wrong key presses
 );
 CREATE INDEX IF NOT EXISTS typing_sessions_text ON typing_sessions(text_id, updated_at);
 CREATE INDEX IF NOT EXISTS typing_sessions_user ON typing_sessions(user_id, started_at);
@@ -85,7 +89,41 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate %s: %w", path, err)
 	}
+	for _, c := range []struct{ table, column, decl string }{
+		{"typing_sessions", "key_errors", `TEXT NOT NULL DEFAULT '{}'`},
+		{"texts", "kind", `TEXT NOT NULL DEFAULT ''`},
+	} {
+		if err := addColumnIfMissing(db, c.table, c.column, c.decl); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("migrate %s: %w", path, err)
+		}
+	}
 	return &Store{db: db, now: func() time.Time { return time.Now().UTC() }}, nil
+}
+
+// addColumnIfMissing adds a column to a table created by an older version
+// (CREATE TABLE IF NOT EXISTS does not change existing tables). The arguments
+// are identifiers spliced into SQL: only ever pass constants.
+func addColumnIfMissing(db *sql.DB, table, column, decl string) error {
+	rows, err := db.Query(`SELECT name FROM pragma_table_info(?)`, table)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return err
+		}
+		if name == column {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = db.Exec(fmt.Sprintf(`ALTER TABLE %s ADD COLUMN %s %s`, table, column, decl))
+	return err
 }
 
 // Close closes the database.
@@ -243,16 +281,26 @@ type Text struct {
 
 // CreateText stores a text (content must already be normalized) under a fresh slug.
 func (s *Store) CreateText(ctx context.Context, creatorID, title, content string) (Text, error) {
+	return s.createText(ctx, s.db, creatorID, title, content, "")
+}
+
+// execQuerier is what createText needs from *sql.DB or *sql.Tx.
+type execQuerier interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+func (s *Store) createText(ctx context.Context, db execQuerier, creatorID, title, content, kind string) (Text, error) {
 	t := Text{CreatorID: creatorID, Title: title, Content: content, CreatedAt: s.now()}
 	for range 10 {
 		t.ID = newSlug()
-		_, err := s.db.ExecContext(ctx, `INSERT INTO texts(id, creator_id, title, content, created_at) VALUES(?,?,?,?,?)`,
-			t.ID, t.CreatorID, t.Title, t.Content, t.CreatedAt)
+		_, err := db.ExecContext(ctx, `INSERT INTO texts(id, creator_id, title, content, created_at, kind) VALUES(?,?,?,?,?,?)`,
+			t.ID, t.CreatorID, t.Title, t.Content, t.CreatedAt, kind)
 		if err == nil {
 			return t, nil
 		}
 		var exists int
-		if qerr := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM texts WHERE id=?`, t.ID).Scan(&exists); qerr != nil || exists == 0 {
+		if qerr := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM texts WHERE id=?`, t.ID).Scan(&exists); qerr != nil || exists == 0 {
 			return t, fmt.Errorf("insert text: %w", err)
 		}
 		// slug collision: retry with a new slug
@@ -302,6 +350,9 @@ type TypingSession struct {
 	StartedAt  time.Time  `json:"started_at"`
 	UpdatedAt  time.Time  `json:"updated_at"`
 	FinishedAt *time.Time `json:"finished_at"`
+	// KeyErrors maps an expected character to the number of wrong key presses
+	// while it was due. Only written by UpsertTypingSession, not read by the lists.
+	KeyErrors map[string]int `json:"key_errors,omitempty"`
 }
 
 // UpsertTypingSession creates or updates a typing session owned by ts.UserID.
@@ -353,15 +404,23 @@ func (s *Store) UpsertTypingSession(ctx context.Context, ts TypingSession, maxPe
 		}
 	}
 	ts.UpdatedAt = s.now()
-	_, err = tx.ExecContext(ctx, `INSERT INTO typing_sessions(id, text_id, user_id, cursor_pos, error_count, cpm, started_at, updated_at, finished_at)
-		VALUES(?,?,?,?,?,?,?,?,?)
+	keyErrors, err := json.Marshal(ts.KeyErrors)
+	if err != nil {
+		return ts, err
+	}
+	if ts.KeyErrors == nil {
+		keyErrors = []byte("{}")
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO typing_sessions(id, text_id, user_id, cursor_pos, error_count, cpm, started_at, updated_at, finished_at, key_errors)
+		VALUES(?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(id) DO UPDATE SET
 			cpm         = CASE WHEN excluded.cursor_pos >= cursor_pos THEN excluded.cpm ELSE cpm END,
+			key_errors  = CASE WHEN excluded.error_count >= error_count THEN excluded.key_errors ELSE key_errors END,
 			cursor_pos  = MAX(cursor_pos, excluded.cursor_pos),
 			error_count = MAX(error_count, excluded.error_count),
 			updated_at  = excluded.updated_at,
 			finished_at = COALESCE(finished_at, excluded.finished_at)`,
-		ts.ID, ts.TextID, ts.UserID, ts.CursorPos, ts.ErrorCount, ts.CPM, ts.StartedAt, ts.UpdatedAt, ts.FinishedAt)
+		ts.ID, ts.TextID, ts.UserID, ts.CursorPos, ts.ErrorCount, ts.CPM, ts.StartedAt, ts.UpdatedAt, ts.FinishedAt, string(keyErrors))
 	if err != nil {
 		return ts, fmt.Errorf("upsert typing session: %w", err)
 	}
@@ -588,4 +647,111 @@ func (s *Store) SeedTexts(ctx context.Context, userID, userName string, texts []
 		}
 	}
 	return deleted, tx.Commit()
+}
+
+// KeyStat is a user's error statistics for one character.
+type KeyStat struct {
+	Char     string  `json:"char"`
+	Errors   int     `json:"errors"`   // wrong key presses while this character was due
+	Attempts int     `json:"attempts"` // correct presses + errors
+	Rate     float64 `json:"rate"`     // Errors / Attempts
+}
+
+// WeakKeys aggregates the key errors of the user's newest sessions (at most
+// `sessions`) started after since. A character is only rated after minAttempts
+// attempts; the result is sorted by error rate, worst first, at most `limit`.
+func (s *Store) WeakKeys(ctx context.Context, userID string, since time.Time, sessions, minAttempts, limit int) ([]KeyStat, error) {
+	// Sessions with errors but empty key_errors (written before key tracking
+	// existed, or resumed from an old client state) would add correct presses
+	// without the matching errors and dilute the rates, so they are skipped.
+	rows, err := s.db.QueryContext(ctx, `SELECT t.content, s.cursor_pos, s.key_errors
+		FROM typing_sessions s JOIN texts t ON t.id=s.text_id
+		WHERE s.user_id=? AND s.started_at >= ? AND (s.key_errors != '{}' OR s.error_count = 0)
+		ORDER BY s.started_at DESC LIMIT ?`, userID, since, sessions)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	type typed struct {
+		content string
+		cursor  int
+	}
+	var sessionsTyped []typed
+	errs := map[rune]int{}
+	for rows.Next() {
+		var content, keyErrors string
+		var cursor int
+		if err := rows.Scan(&content, &cursor, &keyErrors); err != nil {
+			return nil, err
+		}
+		var ke map[string]int
+		if err := json.Unmarshal([]byte(keyErrors), &ke); err != nil {
+			return nil, fmt.Errorf("decode key_errors: %w", err)
+		}
+		for k, n := range ke {
+			if r := []rune(k); len(r) == 1 {
+				errs[r[0]] += n
+			}
+		}
+		sessionsTyped = append(sessionsTyped, typed{content, cursor})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// count correct presses only for characters that have errors at all
+	correct := map[rune]int{}
+	for _, st := range sessionsTyped {
+		i := 0
+		for _, r := range st.content {
+			if i >= st.cursor {
+				break
+			}
+			if _, ok := errs[r]; ok {
+				correct[r]++
+			}
+			i++
+		}
+	}
+	out := []KeyStat{}
+	for r, e := range errs {
+		k := string(r)
+		attempts := correct[r] + e
+		if e == 0 || attempts < minAttempts {
+			continue
+		}
+		out = append(out, KeyStat{Char: k, Errors: e, Attempts: attempts, Rate: float64(e) / float64(attempts)})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Rate != out[j].Rate {
+			return out[i].Rate > out[j].Rate
+		}
+		return out[i].Char < out[j].Char
+	})
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+// CreatePracticeText stores a generated practice text and deletes the user's
+// older practice texts (with their sessions) beyond the newest `keep`, so
+// repeated clicks do not pile up texts.
+func (s *Store) CreatePracticeText(ctx context.Context, userID, title, content string, keep int) (Text, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Text{}, err
+	}
+	defer tx.Rollback()
+	t, err := s.createText(ctx, tx, userID, title, content, "practice")
+	if err != nil {
+		return t, err
+	}
+	old := `SELECT id FROM texts WHERE creator_id=? AND kind='practice' ORDER BY created_at DESC, rowid DESC LIMIT -1 OFFSET ?`
+	if _, err := tx.ExecContext(ctx, `DELETE FROM typing_sessions WHERE text_id IN (`+old+`)`, userID, keep); err != nil {
+		return t, fmt.Errorf("prune practice sessions: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM texts WHERE id IN (`+old+`)`, userID, keep); err != nil {
+		return t, fmt.Errorf("prune practice texts: %w", err)
+	}
+	return t, tx.Commit()
 }

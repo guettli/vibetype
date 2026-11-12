@@ -27,6 +27,16 @@ jeder Nutzer kann Texte anlegen, per Link/Code teilen und sieht live, wer seinen
   das. Lektionen, die aus dem Kurs entfernt wurden, verschwinden samt Sitzungen. Abgeschlossene Lektionen zeigt die
   Startseite mit ✓ und der Bestleistung. Nach dem Abschluss führt ein Link zur nächsten Lektion. Der Anzeigename
   „vibetype“ ist reserviert, damit kein Nutzer offiziell wirkt.
+* **Problemtasten:** Bei jedem Fehler merkt sich die App, welches Zeichen gerade dran war (`key_errors` in der
+  Sitzung). Die Startseite zeigt die 5 Zeichen mit der höchsten Fehlerquote der letzten 30 Tage (Fehler ÷ Versuche,
+  Versuche = korrekt getippte Vorkommen + Fehler). Bewertet wird ein Zeichen erst ab 10 Versuchen. Dazu kommt der
+  Fingerhinweis für das gewählte Layout. „Übungstext für diese Tasten erstellen“ legt einen eigenen Text an: Pro
+  Problemtaste gibt es zwei Zeilen mit Wörtern aus den Lektionen, die das Zeichen enthalten (ohne die Fingerübungs-Zeilen
+  der Lektionen). Bei weniger als drei passenden Wörtern, etwa für Ziffern oder Sonderzeichen, kommen Drill-Gruppen
+  dazu. Für die Leertaste gibt es Zeilen mit kurzen Wörtern, für Enter viele kurze Zeilen. Von den erzeugten
+  Übungstexten bleiben pro Nutzer die neuesten 3 erhalten, ältere werden samt Sitzungen gelöscht. Sitzungen mit Fehlern,
+  aber ohne Aufschlüsselung pro Zeichen (vor dieser Funktion oder von alten Clients), zählen nicht zur Quote, sonst
+  würden sie die Quote verwässern.
 * **Eigene Ergebnisse:** Die Startseite listet die letzten 200 eigenen Tipp-Durchgänge, auch nicht beendete (Datum,
   Text, Fortschritt, Anschläge/min, Fehler, Genauigkeit, Zeit). Die Bestleistung pro Text (beendet, höchste
   Anschläge/min) ist mit ★ markiert. Der Server berechnet sie über alle Durchgänge, nicht nur über die angezeigten.
@@ -96,6 +106,10 @@ go run . -addr :8099 -origin http://localhost:8099 -db /tmp/e2e.db &
 
 * `passkeys.credential` speichert zusätzlich das komplette `webauthn.Credential` als JSON (Flags, Transports,
   Attestation). go-webauthn prüft beim Login die Backup-Flags, `public_key` und `sign_count` allein reichen dafür nicht.
+* `typing_sessions.key_errors` (JSON) zählt die Fehler pro Zeichen. Ältere Datenbanken bekommen die Spalte beim Start
+  per `ALTER TABLE` nachgerüstet.
+* `texts.kind` ist `''` für selbst geschriebene Texte und `practice` für erzeugte Übungstexte (nachgerüstet wie
+  `key_errors`).
 * `auth_sessions` enthält die Login-Sitzungen. Gespeichert wird nur der SHA-256 des Cookie-Tokens.
 
 ### Texte
@@ -109,7 +123,9 @@ verwechselbare Zeichen (kein 0/o, 1/l/i).
 
 ### Sync-Protokoll
 
-`PUT /api/sessions/{client-uuid}` mit `{text_id, cursor_pos, error_count, cpm, started_at, finished_at}`.
+`PUT /api/sessions/{client-uuid}` mit `{text_id, cursor_pos, error_count, cpm, started_at, finished_at, key_errors}`.
+`key_errors` ist optional (ältere Clients senden es nicht). Jeder Schlüssel muss genau ein Zeichen sein, das im Text
+vorkommt, jeder Wert muss zwischen 1 und `error_count` liegen, und die Summe darf `error_count` nicht übersteigen.
 
 * Die Queue (`pending` in `localStorage`) hält pro Sitzung nur den letzten Stand (latest wins). Sie bleibt auch
   nach langer Offline-Phase klein.
@@ -162,6 +178,8 @@ letzten 60 s.
 | GET | `/api/texts/{id}` | jeder angemeldete Nutzer (Teilen per Link); bei Lektionen zusätzlich `next_lesson` |
 | GET | `/api/texts/{id}/sessions` | Live-Ansicht, nur für den Ersteller |
 | GET | `/api/lessons` | eingebaute Lektionen in Kursreihenfolge (`id`, `title`, `length`) |
+| GET | `/api/me/weak-keys` | Problemtasten: `keys` (`char`, `errors`, `attempts`, `rate`), `days`, `min_attempts` |
+| POST | `/api/me/practice` | erstellt einen Übungstext für die Problemtasten (201) oder 409, solange es keine gibt |
 | DELETE | `/api/texts/{id}` | nur der Ersteller; löscht auch alle Sitzungen auf dem Text |
 | GET | `/api/me/results[?text_id=…]` | eigene Sitzungen mit Texttitel und -länge, neueste zuerst (max. 200), dazu `best` (pro Text die beste beendete Sitzung über alle Sitzungen: `id`, `text_id`, `cpm`) |
 | PUT | `/api/sessions/{id}` | Sync |

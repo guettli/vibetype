@@ -50,13 +50,28 @@ await A.page.waitForSelector('.typing');
 const lesson1 = await A.page.evaluate(() => fetch('/api/texts/lek01').then((r) => r.json()).then((t) => t.content));
 // keyboard.type() sends no keydown for non-US characters like ö, so dispatch keydown events like a German keyboard would
 await A.page.evaluate((text) => {
-  for (const ch of text) document.dispatchEvent(new KeyboardEvent('keydown', { key: ch === '\n' ? 'Enter' : ch, bubbles: true, cancelable: true }));
+  const key = (k) => document.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true, cancelable: true }));
+  for (const ch of text) {
+    if (ch === 'ö') key('p'); // Alice always misses the ö first -> it becomes a weak key
+    key(ch === '\n' ? 'Enter' : ch);
+  }
 }, lesson1);
 await A.page.waitForSelector('a.next-lesson[href="/t/lek02"]');
 await A.page.waitForSelector('.summary:has-text("Dein erstes Ergebnis")');
 step(`lesson 1 typed (${lesson1.length} chars): ` + (await A.page.textContent('.summary')).replace(/\s+/g, ' '));
 await A.page.click('a.logo');
 await A.page.waitForSelector('ol.lessons li.done');
+
+// weak keys: ö is listed (every ö was missed once) and a practice text drills it
+await A.page.waitForSelector('table.weak .keycap');
+const weakFirst = await A.page.$eval('table.weak tr', (el) => el.innerText.replace(/\s+/g, ' '));
+if (!weakFirst.startsWith('ö 50 %')) throw new Error('weak keys: ' + weakFirst);
+step('weak key: ' + weakFirst);
+await A.page.click('text=Übungstext für diese Tasten erstellen');
+await A.page.waitForSelector('h2:has-text("Übung: ö")');
+const practiceText = await A.page.textContent('.typing');
+if (!practiceText.includes('ö')) throw new Error('practice text without ö: ' + practiceText);
+step('practice text created: ' + practiceText.split('\n')[0]);
 await A.page.goto(`${BASE}/t/${slug}`);
 
 const B = await newUser('Bob'); step('Bob registered');
@@ -140,7 +155,7 @@ await B.page.keyboard.type('Ha');
 A.page.once('dialog', (d) => d.accept());
 await A.page.goto(BASE + '/');
 await A.page.click(`li:has(code:text("${slug}")) >> text=löschen`);
-await A.page.waitForSelector('text=Noch keine Texte.');
+await A.page.waitForSelector(`code:text("${slug}")`, { state: 'detached' });
 step('creator deleted the text');
 await B.ctx.setOffline(false);
 await B.page.waitForSelector('#status:has-text("von seinem Ersteller gelöscht")', { timeout: 15000 });

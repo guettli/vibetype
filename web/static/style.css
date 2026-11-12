@@ -111,3 +111,10 @@ table.results th.num { text-align: right; }
 ol.lessons { margin: 0; padding-left: 0; list-style: none; display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 4px 16px; }
 ol.lessons li { padding: 4px 0; }
 ol.lessons li.done a { color: var(--ok); }
+
+/* weak keys */
+table.weak { margin-bottom: 12px; font-size: 14px; }
+table.weak td { border-bottom: 0; padding: 4px 8px; }
+.keycap { display: inline-block; min-width: 2em; text-align: center; padding: 2px 8px; border: 1px solid var(--line); border-bottom-width: 3px;
+  border-radius: 6px; font: 600 16px var(--mono); background: var(--bg); }
+@media (max-width: 600px) { table.weak td:last-child { display: none; } }

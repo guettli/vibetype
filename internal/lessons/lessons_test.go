@@ -35,6 +35,9 @@ func TestLessonsOnlyUseLearnedKeys(t *testing.T) {
 		if len(bad) > 0 {
 			t.Errorf("%s uses keys not learned yet: %q", l.ID, strings.Join(bad, ""))
 		}
+		if n := strings.Count(l.Content, "\n") + 1; l.DrillLines >= n {
+			t.Errorf("%s: DrillLines %d but only %d lines", l.ID, l.DrillLines, n)
+		}
 		if got := textnorm.Normalize(l.Content); got != l.Content {
 			t.Errorf("%s is not normalized:\n%q\n%q", l.ID, l.Content, got)
 		}
