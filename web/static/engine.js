@@ -3,7 +3,17 @@
 // newSession creates the local state of one typing run over `content`.
 export function newSession(id, textId) {
   // keyErrors: expected character -> number of wrong key presses while it was due
-  return { id, textId, cursor: 0, errors: 0, keyErrors: {}, startedAt: null, finishedAt: null };
+  // activeMs: typing time without pauses (see pauseThreshold); lastKeyAt: ms timestamp of the last key press;
+  // avgGapMs: the typist's usual gap; countedKeys: key presses whose time is in activeMs
+  return { id, textId, cursor: 0, errors: 0, keyErrors: {}, startedAt: null, finishedAt: null, ...freshTiming() };
+}
+
+const freshTiming = () => ({ activeMs: 0, lastKeyAt: null, avgGapMs: null, countedKeys: 0 });
+
+// upgrade gives a not yet started state of an older version the pause-aware timing.
+export function upgrade(state) {
+  if (!state.startedAt && state.activeMs === undefined) Object.assign(state, freshTiming());
+  return state;
 }
 
 // chars splits a text into code points (the server counts runes, not UTF-16 units).
@@ -27,6 +37,21 @@ export function keyToChar(ev) {
 export function press(state, textChars, ch, now) {
   if (state.finishedAt || state.cursor >= textChars.length) return 'ignored';
   if (!state.startedAt) state.startedAt = new Date(now).toISOString();
+  if (state.activeMs !== undefined && (state.countedKeys ?? 0) !== state.cursor + state.errors) {
+    // Key presses happened without timing (an old-version tab, another tab on the
+    // same text): the active time is incomplete, so this run uses wall time.
+    state.activeMs = undefined;
+  }
+  if (state.activeMs !== undefined) { // undefined: wall-clock time
+    if (state.lastKeyAt !== null) {
+      const gap = Math.max(now - state.lastKeyAt, 0);
+      const counted = Math.min(gap, pauseThreshold(state));
+      state.activeMs += counted;
+      state.avgGapMs = state.avgGapMs === null ? counted : 0.8 * state.avgGapMs + 0.2 * counted;
+    }
+    state.lastKeyAt = now;
+    state.countedKeys = state.cursor + state.errors + 1;
+  }
   if (ch === textChars[state.cursor]) {
     state.cursor++;
     if (state.cursor === textChars.length) state.finishedAt = new Date(now).toISOString();
@@ -43,12 +68,32 @@ export function press(state, textChars, ch, now) {
 // clamps to the same value, so the client shows what the server stores.
 export const MAX_CPM = 3000;
 
-// cpm = correct characters per minute since the first key press, at most MAX_CPM.
+// A gap between two key presses counts at most pauseThreshold, so a break
+// (reading, talking, the bell) does not ruin the speed. The threshold adapts to
+// the typist: a beginner who needs 5 s per key is not counted as pausing.
+export const MAX_GAP_MS = 3000;
+export function pauseThreshold(state) {
+  return Math.max(MAX_GAP_MS, 4 * (state.avgGapMs ?? 0));
+}
+
+// wallMs is the time from the first key press to the end (or now).
+export function wallMs(state, now) {
+  if (!state.startedAt) return 0;
+  return (state.finishedAt ? Date.parse(state.finishedAt) : now) - Date.parse(state.startedAt);
+}
+
+// activeMs is the typing time without pauses; while typing, the running gap
+// counts up to MAX_GAP_MS. States of older versions fall back to wall time.
+export function activeMs(state, now) {
+  if (state.activeMs === undefined || !state.startedAt) return wallMs(state, now);
+  const running = state.finishedAt || state.lastKeyAt === null ? 0 : Math.min(Math.max(now - state.lastKeyAt, 0), pauseThreshold(state));
+  return state.activeMs + running;
+}
+
+// cpm = correct characters per minute of active typing time, at most MAX_CPM.
 export function cpm(state, now) {
   if (!state.startedAt || state.cursor === 0) return 0;
-  const end = state.finishedAt ? Date.parse(state.finishedAt) : now;
-  const minutes = (end - Date.parse(state.startedAt)) / 60000;
-  if (minutes <= 0) return 0;
+  const minutes = activeMs(state, now) / 60000;
   return Math.min(MAX_CPM, Math.round(state.cursor / Math.max(minutes, 1 / 60))); // at least 1s to avoid silly peaks
 }
 
@@ -68,5 +113,7 @@ export function syncPayload(state, now) {
     started_at: state.startedAt,
     finished_at: state.finishedAt,
     key_errors: state.keyErrors ?? {},
+    // null = measured on wall-clock time (older states); not comparable with active-time runs
+    active_ms: state.activeMs === undefined || !state.startedAt ? null : Math.round(activeMs(state, now)),
   };
 }

@@ -573,3 +573,42 @@ func TestPasskeyChangesNeedRecentLogin(t *testing.T) {
 		t.Fatalf("own session must survive: %d", c)
 	}
 }
+
+func TestActiveMS(t *testing.T) {
+	e := newEnv(t)
+	_, tok := e.login("Ali")
+	var txt store.Text
+	e.do(tok, "POST", "/api/texts", map[string]string{"title": "t", "content": "abc"}, &txt)
+	start := time.Now().UTC().Add(-time.Minute)
+	fin := time.Now().UTC()
+	put := func(id string, cpm int, active any) int {
+		return e.do(tok, "PUT", "/api/sessions/"+id, map[string]any{"text_id": txt.ID, "cursor_pos": 3, "error_count": 0,
+			"cpm": cpm, "started_at": start, "finished_at": fin, "active_ms": active}, nil)
+	}
+	if c := put("session-too-long", 10, 10*60*1000); c != 400 {
+		t.Fatalf("active_ms beyond elapsed time: %d", c)
+	}
+	if c := put("session-negative", 10, -1); c != 400 {
+		t.Fatalf("negative active_ms: %d", c)
+	}
+	// an old wall-time run with a higher cpm, then a pause-aware run with a lower one
+	if c := put("session-old", 500, nil); c != 200 {
+		t.Fatalf("old run: %d", c)
+	}
+	if c := put("session-new", 300, 20000); c != 200 {
+		t.Fatalf("new run: %d", c)
+	}
+	var res struct {
+		Results []store.Result `json:"results"`
+		Best    []store.Best   `json:"best"`
+	}
+	e.do(tok, "GET", "/api/me/results", nil, &res)
+	if len(res.Best) != 1 || res.Best[0].ID != "session-new" {
+		t.Fatalf("pause-aware run must be the best (not comparable with the old one): %+v", res.Best)
+	}
+	for _, r := range res.Results {
+		if (r.ID == "session-new") != (r.ActiveMS != nil) {
+			t.Fatalf("active_ms not returned correctly: %+v", r)
+		}
+	}
+}

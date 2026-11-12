@@ -324,6 +324,7 @@ func (s *Server) syncSession(w http.ResponseWriter, r *http.Request) {
 		StartedAt  time.Time      `json:"started_at"`
 		FinishedAt *time.Time     `json:"finished_at"`
 		KeyErrors  map[string]int `json:"key_errors"`
+		ActiveMS   *int64         `json:"active_ms"`
 	}
 	if !readJSON(w, r, &in) {
 		return
@@ -361,6 +362,17 @@ func (s *Server) syncSession(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "finished_at before started_at or in the future")
 		return
 	}
+	if in.ActiveMS != nil {
+		end := now
+		if in.FinishedAt != nil {
+			end = *in.FinishedAt
+		}
+		// active time can never exceed the wall time (one minute of clock skew allowed)
+		if *in.ActiveMS < 0 || *in.ActiveMS > end.Sub(in.StartedAt).Milliseconds()+60000 {
+			httpError(w, http.StatusBadRequest, "active_ms must be between 0 and the elapsed time")
+			return
+		}
+	}
 	if msg := validKeyErrors(in.KeyErrors, t.Content, in.ErrorCount); msg != "" {
 		httpError(w, http.StatusBadRequest, "invalid key_errors: "+msg)
 		return
@@ -373,7 +385,7 @@ func (s *Server) syncSession(w http.ResponseWriter, r *http.Request) {
 	}
 	ts, err := s.cfg.Store.UpsertTypingSession(r.Context(), store.TypingSession{
 		ID: id, TextID: t.ID, UserID: userFrom(r.Context()).ID,
-		CursorPos: in.CursorPos, ErrorCount: in.ErrorCount, CPM: in.CPM, KeyErrors: in.KeyErrors,
+		CursorPos: in.CursorPos, ErrorCount: in.ErrorCount, CPM: in.CPM, KeyErrors: in.KeyErrors, ActiveMS: in.ActiveMS,
 		StartedAt: in.StartedAt.UTC(), FinishedAt: utcPtr(in.FinishedAt),
 	}, maxSessionsPerText)
 	if errors.Is(err, store.ErrNotFound) { // deleted concurrently

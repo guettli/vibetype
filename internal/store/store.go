@@ -65,7 +65,8 @@ CREATE TABLE IF NOT EXISTS typing_sessions (
 	started_at  DATETIME NOT NULL,
 	updated_at  DATETIME NOT NULL,
 	finished_at DATETIME,
-	key_errors  TEXT NOT NULL DEFAULT '{}' -- JSON: expected character -> wrong key presses
+	key_errors  TEXT NOT NULL DEFAULT '{}', -- JSON: expected character -> wrong key presses
+	active_ms   INTEGER                     -- typing time without pauses; NULL = measured on wall time (older clients)
 );
 CREATE INDEX IF NOT EXISTS typing_sessions_text ON typing_sessions(text_id, updated_at);
 CREATE INDEX IF NOT EXISTS typing_sessions_user ON typing_sessions(user_id, started_at);
@@ -103,6 +104,7 @@ func Open(path string) (*Store, error) {
 		{"texts", "kind", `TEXT NOT NULL DEFAULT ''`},
 		{"passkeys", "label", `TEXT NOT NULL DEFAULT ''`},
 		{"passkeys", "last_used_at", `DATETIME`},
+		{"typing_sessions", "active_ms", `INTEGER`},
 	} {
 		if err := addColumnIfMissing(db, c.table, c.column, c.decl); err != nil {
 			db.Close()
@@ -366,6 +368,9 @@ type TypingSession struct {
 	// KeyErrors maps an expected character to the number of wrong key presses
 	// while it was due. Only written by UpsertTypingSession, not read by the lists.
 	KeyErrors map[string]int `json:"key_errors,omitempty"`
+	// ActiveMS is the typing time without pauses; nil for runs of older clients,
+	// whose cpm includes pauses and is therefore not comparable.
+	ActiveMS *int64 `json:"active_ms"`
 }
 
 // UpsertTypingSession creates or updates a typing session owned by ts.UserID.
@@ -409,7 +414,7 @@ func (s *Store) UpsertTypingSession(ctx context.Context, ts TypingSession, maxPe
 			if _, err := tx.ExecContext(ctx, `DELETE FROM typing_sessions WHERE id IN (
 					SELECT id FROM typing_sessions WHERE text_id=? AND user_id=? AND id NOT IN (
 						SELECT id FROM typing_sessions WHERE text_id=? AND user_id=? AND finished_at IS NOT NULL
-						ORDER BY cpm DESC, finished_at ASC LIMIT 1)
+						ORDER BY (active_ms IS NOT NULL) DESC, cpm DESC, finished_at ASC LIMIT 1)
 					ORDER BY started_at ASC LIMIT ?)`,
 				ts.TextID, ts.UserID, ts.TextID, ts.UserID, n-maxPerUser+1); err != nil {
 				return ts, fmt.Errorf("prune old sessions: %w", err)
@@ -424,16 +429,17 @@ func (s *Store) UpsertTypingSession(ctx context.Context, ts TypingSession, maxPe
 	if ts.KeyErrors == nil {
 		keyErrors = []byte("{}")
 	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO typing_sessions(id, text_id, user_id, cursor_pos, error_count, cpm, started_at, updated_at, finished_at, key_errors)
-		VALUES(?,?,?,?,?,?,?,?,?,?)
+	_, err = tx.ExecContext(ctx, `INSERT INTO typing_sessions(id, text_id, user_id, cursor_pos, error_count, cpm, started_at, updated_at, finished_at, key_errors, active_ms)
+		VALUES(?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(id) DO UPDATE SET
 			cpm         = CASE WHEN excluded.cursor_pos >= cursor_pos THEN excluded.cpm ELSE cpm END,
+			active_ms   = CASE WHEN excluded.cursor_pos >= cursor_pos THEN excluded.active_ms ELSE active_ms END,
 			key_errors  = CASE WHEN excluded.error_count >= error_count THEN excluded.key_errors ELSE key_errors END,
 			cursor_pos  = MAX(cursor_pos, excluded.cursor_pos),
 			error_count = MAX(error_count, excluded.error_count),
 			updated_at  = excluded.updated_at,
 			finished_at = COALESCE(finished_at, excluded.finished_at)`,
-		ts.ID, ts.TextID, ts.UserID, ts.CursorPos, ts.ErrorCount, ts.CPM, ts.StartedAt, ts.UpdatedAt, ts.FinishedAt, string(keyErrors))
+		ts.ID, ts.TextID, ts.UserID, ts.CursorPos, ts.ErrorCount, ts.CPM, ts.StartedAt, ts.UpdatedAt, ts.FinishedAt, string(keyErrors), ts.ActiveMS)
 	if err != nil {
 		return ts, fmt.Errorf("upsert typing session: %w", err)
 	}
@@ -491,7 +497,7 @@ type Result struct {
 // to one text if not empty.
 func (s *Store) ResultsForUser(ctx context.Context, userID, textID string, limit int) ([]Result, error) {
 	q := `SELECT s.id, s.text_id, s.user_id, u.display_name, s.cursor_pos, s.error_count, s.cpm,
-			s.started_at, s.updated_at, s.finished_at, t.title, length(t.content)
+			s.started_at, s.updated_at, s.finished_at, t.title, length(t.content), s.active_ms
 		FROM typing_sessions s JOIN users u ON u.id=s.user_id JOIN texts t ON t.id=s.text_id
 		WHERE s.user_id=?`
 	args := []any{userID}
@@ -511,7 +517,7 @@ func (s *Store) ResultsForUser(ctx context.Context, userID, textID string, limit
 		var r Result
 		var fin sql.NullTime
 		if err := rows.Scan(&r.ID, &r.TextID, &r.UserID, &r.UserName, &r.CursorPos, &r.ErrorCount, &r.CPM,
-			&r.StartedAt, &r.UpdatedAt, &fin, &r.TextTitle, &r.TextLength); err != nil {
+			&r.StartedAt, &r.UpdatedAt, &fin, &r.TextTitle, &r.TextLength, &r.ActiveMS); err != nil {
 			return nil, err
 		}
 		if fin.Valid {
@@ -561,7 +567,9 @@ type Best struct {
 // cpm (ties: the earlier one). Not limited, unlike ResultsForUser.
 func (s *Store) BestResults(ctx context.Context, userID string) ([]Best, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id, text_id, cpm FROM (
-			SELECT id, text_id, cpm, ROW_NUMBER() OVER (PARTITION BY text_id ORDER BY cpm DESC, finished_at ASC) AS rn
+			SELECT id, text_id, cpm, ROW_NUMBER() OVER (PARTITION BY text_id
+				-- runs measured without pauses (active_ms) beat older wall-time runs: not comparable
+				ORDER BY (active_ms IS NOT NULL) DESC, cpm DESC, finished_at ASC) AS rn
 			FROM typing_sessions WHERE user_id=? AND finished_at IS NOT NULL)
 		WHERE rn=1`, userID)
 	if err != nil {
