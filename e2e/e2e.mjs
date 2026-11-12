@@ -111,14 +111,25 @@ await A.page.click('text=Speichern & teilen');
 await A.page.waitForSelector('#status:has-text("cannot be typed")');
 step('emoji text rejected: ' + await A.page.$eval('#status', (e) => e.innerText));
 
-// creator deletes the text (with all results)
+// Bob types offline, the creator deletes the text meanwhile -> Bob gets a clear message on reconnect
+await B.page.click('text=Mit Passkey anmelden');
+await B.page.waitForSelector('#user:has-text("Bob")');
+await B.page.goto(`${BASE}/t/${slug}`);
+await B.page.waitForSelector('.typing');
+await B.ctx.setOffline(true);
+await B.page.keyboard.type('Ha');
 A.page.once('dialog', (d) => d.accept());
 await A.page.goto(BASE + '/');
 await A.page.click(`li:has(code:text("${slug}")) >> text=löschen`);
 await A.page.waitForSelector('text=Noch keine Texte.');
 step('creator deleted the text');
+await B.ctx.setOffline(false);
+await B.page.waitForSelector('#status:has-text("von seinem Ersteller gelöscht")', { timeout: 15000 });
+const leftAfterDelete = await B.page.evaluate((id) => Object.keys(localStorage).filter((k) => k.endsWith(':' + id) || (k.endsWith(':pending') && localStorage[k] !== '{}')), slug);
+if (leftAfterDelete.length) throw new Error('stale data for deleted text: ' + leftAfterDelete);
+step('typist told about the deletion, local data dropped');
 
-const relevant = errors.filter((e) => !e.includes('net::ERR_INTERNET_DISCONNECTED') && !e.includes('Failed to fetch') && !e.includes('401 (Unauthorized)') && !e.includes('400 (Bad Request)') /* /api/me before login */);
+const relevant = errors.filter((e) => !e.includes('net::ERR_INTERNET_DISCONNECTED') && !e.includes('Failed to fetch') && !e.includes('401 (Unauthorized)') && !e.includes('400 (Bad Request)') && !e.includes('404 (Not Found)') /* /api/me before login */);
 console.log('console errors:', relevant.length ? relevant : 'none', `(${errors.length - relevant.length} expected offline fetch errors)`);
 await browser.close();
 if (relevant.length) process.exit(1);

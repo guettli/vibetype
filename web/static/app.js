@@ -105,6 +105,16 @@ function fail(msg) {
 // "pending" maps sessionId -> latest payload. Progress is latest-wins, so the queue
 // never holds more than one entry per session, even after a long offline phase.
 
+// forgetText drops everything this browser keeps about a text (it was deleted).
+function forgetText(textId) {
+  us.del('text:' + textId);
+  us.del('session:' + textId);
+  us.del('history:' + textId);
+  const pending = us.get('pending', {});
+  for (const [id, p] of Object.entries(pending)) if (p.text_id === textId) delete pending[id];
+  us.set('pending', pending);
+}
+
 function enqueue(state) {
   const pending = us.get('pending', {});
   pending[state.id] = syncPayload(state, Date.now());
@@ -126,6 +136,12 @@ async function flush() {
         if (isOffline(err)) { status.sync = 'offline'; break; }
         if (err.status === 401) { status.sync = 'unauthorized'; break; }
         if (err.status >= 500 || err.status === 429) { fail(`Sync-Fehler auf dem Server (${err.status}): ${err.message}`); break; }
+        if (err.status === 404) {
+          const title = us.get('text:' + payload.text_id)?.title ?? payload.text_id;
+          forgetText(payload.text_id);
+          fail(`Der Text „${title}“ wurde von seinem Ersteller gelöscht. Dein Fortschritt darauf wurde verworfen.`);
+          continue;
+        }
         // Permanent rejection (4xx): report loudly and drop, retrying cannot help.
         fail(`Sync abgelehnt (${err.status}): ${err.message}`);
         rejected = true;
@@ -390,8 +406,7 @@ async function homeView() {
           if (!confirm(`Text „${t.title}“ und alle Ergebnisse dazu (auch die anderer Personen) endgültig löschen?`)) return;
           try {
             await api('DELETE', '/api/texts/' + t.id);
-            us.del('text:' + t.id);
-            us.del('session:' + t.id);
+            forgetText(t.id);
             homeView();
           } catch (err) { fail(`Löschen fehlgeschlagen: ${err.message}`); }
         },
@@ -412,14 +427,14 @@ const fmtDuration = (ms) => {
 const fmtDate = (iso) => new Date(iso).toLocaleString('de-DE', { dateStyle: 'short', timeStyle: 'short' });
 const resultAccuracy = (r) => accuracy({ cursor: r.cursor_pos, errors: r.error_count });
 
-// bestByText maps text_id -> id of the finished result with the highest cpm
-function bestByText(results) {
-  const best = {};
-  for (const r of results) {
+// bestOf returns the finished run with the highest cpm (ties: the earlier one), or null.
+function bestOf(runs) {
+  let best = null;
+  for (const r of runs) {
     if (!r.finished_at) continue;
-    if (!best[r.text_id] || r.cpm > best[r.text_id].cpm) best[r.text_id] = r;
+    if (!best || r.cpm > best.cpm || (r.cpm === best.cpm && r.finished_at < best.finished_at)) best = r;
   }
-  return Object.fromEntries(Object.entries(best).map(([k, r]) => [k, r.id]));
+  return best;
 }
 
 async function loadResults($el) {
@@ -429,15 +444,15 @@ async function loadResults($el) {
     fill($el, h('p', { class: isOffline(err) ? 'warn' : 'bad' }, isOffline(err) ? 'offline – Ergebnisse nicht verfügbar' : err.message));
     return;
   }
-  const { results } = data;
+  const { results, limit } = data;
   if (!results.length) { fill($el, h('p', { class: 'muted' }, 'Noch keine Ergebnisse. Öffne einen Text und tippe los.')); return; }
-  const best = bestByText(results);
-  fill($el, h('table', { class: 'results' },
+  const best = new Set(data.best_ids); // computed over all runs, not only the listed ones
+  fill($el, results.length >= limit ? h('p', { class: 'muted' }, `Die letzten ${limit} Durchgänge:`) : null, h('table', { class: 'results' },
     h('thead', {}, h('tr', {}, h('th', {}, 'Datum'), h('th', {}, 'Text'), h('th', {}, 'Fortschritt'), h('th', { class: 'num' }, 'Anschl./min'),
       h('th', { class: 'num' }, 'Fehler'), h('th', { class: 'num' }, 'Genauigkeit'), h('th', { class: 'num' }, 'Zeit'))),
     h('tbody', {}, results.map((r) => h('tr', {},
       h('td', {}, fmtDate(r.started_at)),
-      h('td', {}, h('a', { href: '/t/' + r.text_id, 'data-link': true }, r.text_title), best[r.text_id] === r.id ? h('span', { class: 'best', title: 'Bestleistung' }, ' ★') : null),
+      h('td', {}, h('a', { href: '/t/' + r.text_id, 'data-link': true }, r.text_title), best.has(r.id) ? h('span', { class: 'best', title: 'Bestleistung' }, ' ★') : null),
       h('td', {}, r.finished_at ? 'fertig' : `${Math.floor((r.cursor_pos / r.text_length) * 100)} %`),
       h('td', { class: 'num' }, r.cpm),
       h('td', { class: 'num' }, r.error_count),
@@ -456,6 +471,7 @@ async function loadText(id) {
   } catch (err) {
     const cached = us.get('text:' + id);
     if (isOffline(err) && cached) return cached;
+    if (err.status === 404) forgetText(id);
     throw err;
   }
 }
@@ -481,14 +497,20 @@ async function typingView(textId) {
   const $typing = h('div', { class: 'typing', tabindex: 0 }, $done, $cur, $rest);
   const $stats = h('div', { class: 'stats' });
   const $summary = h('div', { class: 'summary', hidden: true });
-  // previous best (finished, highest cpm) of this user on this text; null = none, undefined = unknown (offline)
-  let previousBest;
-  api('GET', '/api/me/results?text_id=' + encodeURIComponent(textId))
-    .then(({ results }) => {
-      previousBest = results.filter((r) => r.finished_at && r.id !== state.id).reduce((b, r) => (!b || r.cpm > b.cpm ? r : b), null);
-      renderSummary();
-    })
+  // Earlier runs of this user on this text: from the server (all devices) plus the
+  // local history (this device, includes runs not synced yet). serverRuns stays
+  // null while offline or not loaded yet.
+  const historyKey = 'history:' + textId;
+  let serverRuns = null;
+  flush() // so the server already knows about runs finished offline
+    .then(() => api('GET', '/api/me/results?text_id=' + encodeURIComponent(textId)))
+    .then(({ results }) => { serverRuns = results; renderSummary(); })
     .catch((err) => { if (!isOffline(err)) fail(`Ergebnisse konnten nicht geladen werden: ${err.message}`); });
+  const previousBest = () => bestOf([...(serverRuns ?? []), ...us.get(historyKey, [])].filter((r) => r.id !== state.id));
+  function rememberFinished() {
+    const run = { id: state.id, cpm: cpm(state, Date.now()), cursor_pos: state.cursor, error_count: state.errors, finished_at: state.finishedAt };
+    us.set(historyKey, [...us.get(historyKey, []), run].slice(-50));
+  }
   const kb = keyboardWidget(() => { if (document.activeElement !== $typing) $typing.focus(); });
   const $live = h('div', { class: 'live' });
   const shareUrl = `${location.origin}/t/${text.id}`;
@@ -516,10 +538,11 @@ async function typingView(textId) {
     $summary.hidden = !state.finishedAt;
     if (!state.finishedAt) return;
     const myCpm = cpm(state, Date.now());
+    const best = previousBest();
     let verdict = null;
-    if (previousBest === null) verdict = h('p', {}, 'Dein erstes Ergebnis für diesen Text.');
-    else if (previousBest && myCpm > previousBest.cpm) verdict = h('p', { class: 'good' }, `★ Neue Bestleistung! Vorher ${previousBest.cpm} Anschläge/min.`);
-    else if (previousBest) verdict = h('p', {}, `Deine Bestleistung: ${previousBest.cpm} Anschläge/min (${resultAccuracy(previousBest)} % Genauigkeit).`);
+    if (!best) verdict = serverRuns ? h('p', {}, 'Dein erstes Ergebnis für diesen Text.') : null; // offline: unknown
+    else if (myCpm > best.cpm) verdict = h('p', { class: 'good' }, `★ Neue Bestleistung! Vorher ${best.cpm} Anschläge/min.`);
+    else verdict = h('p', {}, `Deine Bestleistung: ${best.cpm} Anschläge/min (${resultAccuracy(best)} % Genauigkeit).`);
     fill($summary, ...[
       h('h3', {}, 'Fertig!'),
       h('p', {}, `${myCpm} Anschläge/min · ${accuracy(state)} % Genauigkeit · ${state.errors} Fehler · Zeit ${fmtDuration(Date.parse(state.finishedAt) - Date.parse(state.startedAt))}`),
@@ -527,11 +550,6 @@ async function typingView(textId) {
     ].filter(Boolean));
   }
   function restart() {
-    if (state.finishedAt && previousBest !== undefined) {
-      // the run just finished becomes the reference for the next one
-      const mine = { id: state.id, cpm: cpm(state, Date.now()), cursor_pos: state.cursor, error_count: state.errors, finished_at: state.finishedAt };
-      if (!previousBest || mine.cpm > previousBest.cpm) previousBest = mine;
-    }
     state = newSession(crypto.randomUUID(), textId);
     us.set(stateKey, state);
     render();
@@ -551,6 +569,7 @@ async function typingView(textId) {
     const result = press(state, textChars, ch, Date.now());
     if (result === 'ignored') return;
     if (result === 'error') { flash(); kb.wrong(ch); }
+    if (state.finishedAt) rememberFinished(); // press() returns 'ignored' after the end, so this runs once
     us.set(stateKey, state);
     enqueue(state); // dirty flag: picked up by the sync loop
     render();

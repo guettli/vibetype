@@ -58,6 +58,7 @@ CREATE TABLE IF NOT EXISTS typing_sessions (
 	finished_at DATETIME
 );
 CREATE INDEX IF NOT EXISTS typing_sessions_text ON typing_sessions(text_id, updated_at);
+CREATE INDEX IF NOT EXISTS typing_sessions_user ON typing_sessions(user_id, started_at);
 -- login sessions (HTTP-only cookie); only the SHA-256 of the token is stored
 CREATE TABLE IF NOT EXISTS auth_sessions (
 	token_hash TEXT PRIMARY KEY,
@@ -318,6 +319,15 @@ func (s *Store) UpsertTypingSession(ctx context.Context, ts TypingSession, maxPe
 		return ts, err
 	}
 	defer tx.Rollback()
+	// The text may have been deleted since the caller looked it up; check inside
+	// the transaction so a concurrent delete yields ErrNotFound, not an FK error.
+	var textExists int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM texts WHERE id=?`, ts.TextID).Scan(&textExists); err != nil {
+		return ts, err
+	}
+	if textExists == 0 {
+		return ts, ErrNotFound
+	}
 	var owner, textID string
 	err = tx.QueryRowContext(ctx, `SELECT user_id, text_id FROM typing_sessions WHERE id=?`, ts.ID).Scan(&owner, &textID)
 	switch {
@@ -460,4 +470,26 @@ func (s *Store) DeleteText(ctx context.Context, textID, userID string) error {
 		return fmt.Errorf("delete text: %w", err)
 	}
 	return tx.Commit()
+}
+
+// BestResultIDs returns, per text, the id of the user's finished session with
+// the highest cpm (ties: the earlier one). Not limited, unlike ResultsForUser.
+func (s *Store) BestResultIDs(ctx context.Context, userID string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id FROM (
+			SELECT id, ROW_NUMBER() OVER (PARTITION BY text_id ORDER BY cpm DESC, finished_at ASC) AS rn
+			FROM typing_sessions WHERE user_id=? AND finished_at IS NOT NULL)
+		WHERE rn=1`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
 }

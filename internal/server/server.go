@@ -30,6 +30,7 @@ const (
 	maxContentLen = 20000
 	maxNameLen    = 64
 
+	maxResults           = 200
 	maxCPM               = 3000 // world records are around 1000-1300 cpm
 	maxSessionsPerText   = 50   // per user and text
 	maxPendingCeremonies = 10000
@@ -341,6 +342,10 @@ func (s *Server) syncSession(w http.ResponseWriter, r *http.Request) {
 		CursorPos: in.CursorPos, ErrorCount: in.ErrorCount, CPM: in.CPM,
 		StartedAt: in.StartedAt.UTC(), FinishedAt: utcPtr(in.FinishedAt),
 	}, maxSessionsPerText)
+	if errors.Is(err, store.ErrNotFound) { // deleted concurrently
+		httpError(w, http.StatusNotFound, "text not found")
+		return
+	}
 	if errors.Is(err, store.ErrLimit) {
 		httpError(w, http.StatusTooManyRequests, fmt.Sprintf("more than %d typing sessions on this text", maxSessionsPerText))
 		return
@@ -402,10 +407,16 @@ func (s *Server) deleteText(w http.ResponseWriter, r *http.Request) {
 
 // myResults lists the caller's typing sessions (newest first), optionally for one text.
 func (s *Server) myResults(w http.ResponseWriter, r *http.Request) {
-	results, err := s.cfg.Store.ResultsForUser(r.Context(), userFrom(r.Context()).ID, r.URL.Query().Get("text_id"), 200)
+	uid := userFrom(r.Context()).ID
+	results, err := s.cfg.Store.ResultsForUser(r.Context(), uid, r.URL.Query().Get("text_id"), maxResults)
 	if err != nil {
 		s.internal(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"results": results})
+	best, err := s.cfg.Store.BestResultIDs(r.Context(), uid)
+	if err != nil {
+		s.internal(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"results": results, "best_ids": best, "limit": maxResults})
 }
