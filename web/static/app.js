@@ -609,6 +609,7 @@ async function loadWeakKeys($el, synced) {
   );
 }
 
+const fmtNum = (v) => v.toLocaleString('de-DE', { maximumFractionDigits: 1 });
 const CHART = { width: 640, height: 170, left: 44, right: 12, top: 10, bottom: 24 };
 
 // chart draws one value of the daily points as a line with a dot per day.
@@ -616,7 +617,7 @@ function chart(points, key, kind, n, caption, unit) {
   const p = plot(points, key, kind, n, CHART);
   const grid = [p.lo, (p.lo + p.hi) / 2, p.hi].map((v) => [
     svg('line', { class: 'grid', x1: CHART.left, x2: CHART.width - CHART.right, y1: p.y(v), y2: p.y(v) }),
-    svg('text', { x: CHART.left - 6, y: p.y(v) + 4, 'text-anchor': 'end' }, Number.isInteger(v) ? v : v.toLocaleString('de-DE', { maximumFractionDigits: 1 })),
+    svg('text', { x: CHART.left - 6, y: p.y(v) + 4, 'text-anchor': 'end' }, fmtNum(v)),
   ]);
   const fmtDay = (d) => new Date(d + 'T12:00').toLocaleDateString('de-DE', { day: 'numeric', month: 'numeric' });
   const xLabel = (i, text, anchor) => svg('text', { x: p.x(i), y: CHART.height - 6, 'text-anchor': anchor }, text);
@@ -627,7 +628,7 @@ function chart(points, key, kind, n, caption, unit) {
       xLabel(p.first, `vor ${n - 1 - p.first} Tagen`, 'start'), xLabel(n - 1, 'heute', 'end'),
       svg('polyline', { class: 'line', points: p.coords.map((c) => `${c.x},${c.y}`).join(' ') }),
       p.coords.map((c) => svg('circle', { cx: c.x, cy: c.y, r: 4 },
-        svg('title', {}, `${fmtDay(c.point.day)}: ${c.point[key]}${unit} (${c.point.runs} ${c.point.runs === 1 ? 'Durchgang' : 'Durchgänge'})`))),
+        svg('title', {}, `${fmtDay(c.point.day)}: ${fmtNum(c.point[key])}${unit} (${c.point.runs} ${c.point.runs === 1 ? 'Durchgang' : 'Durchgänge'})`))),
     ));
 }
 
@@ -642,7 +643,7 @@ async function loadProgress($el, synced) {
   }
   const today = new Date();
   const n = data.days;
-  const st = streak(data.runs, today, n);
+  const st = streak(data.practice_days, today, n);
   const points = daily(data.runs, today, n);
   const days = (k) => `${k} ${k === 1 ? 'Tag' : 'Tagen'}`;
   let streakText;
@@ -652,9 +653,9 @@ async function loadProgress($el, synced) {
   fill($el,
     h('p', { class: 'streak' }, h('b', {}, streakText), ' ',
       h('span', { class: 'muted' }, `${st.practiceDays} ${st.practiceDays === 1 ? 'Übungstag' : 'Übungstage'} in den letzten ${days(n)}.`)),
-    data.truncated ? h('p', { class: 'warn' }, `Nur die neuesten ${data.limit} Durchgänge sind berücksichtigt, ältere fehlen in der Kurve.`) : null,
+    data.truncated ? h('p', { class: 'warn' }, `In der Kurve werden nur die neuesten ${data.limit} Durchgänge berücksichtigt, ältere fehlen.`) : null,
     points.length < 2
-      ? h('p', { class: 'muted' }, 'Die Kurve erscheint, sobald du an zwei Tagen einen Text beendet hast.')
+      ? h('p', { class: 'muted' }, 'Die Kurve erscheint, sobald du an zwei Tagen einen Text beendet hast. Durchgänge aus älteren Versionen der App zählen nicht mit, ihre Zeit enthält Pausen.')
       : [
         chart(points, 'cpm', 'cpm', n, 'Anschläge/min (Median pro Tag, ohne Pausen)', ' Anschläge/min'),
         chart(points, 'accuracy', 'accuracy', n, 'Genauigkeit in % pro Tag', ' %'),

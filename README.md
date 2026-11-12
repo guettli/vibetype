@@ -66,15 +66,14 @@ jeder Nutzer kann Texte anlegen, per Link/Code teilen und sieht live, wer seinen
   Bestleistung. Dafür zählen die Durchgänge auf dem Server und die lokale Historie dieses Browsers, also auch noch
   nicht synchronisierte oder offline beendete Durchgänge.
 * **Fortschritt:** Die Startseite zeigt, an wie vielen Tagen in Folge man geübt hat. Jeder Tag zählt, an dem
-  mindestens ein Zeichen getippt wurde, auch ohne den Text zu beenden. Maßgeblich ist der Tag des letzten Syncs. Wer
-  heute noch nicht geübt hat, verliert die Serie erst um Mitternacht; die App erinnert dann daran. Dazu kommen zwei
-  Kurven über die letzten 90 Tage: Anschläge/min (Median der beendeten Durchgänge pro Tag) und Genauigkeit (über alle
-  Anschläge des Tages). In die Kurven gehen nur Durchgänge mit gemessener Tippzeit ohne Pausen ein, ältere würden
-  springen. Die x-Achse beginnt am ersten Tag mit Daten und zeigt mindestens eine Woche. Die Kurve erscheint ab zwei
-  Tagen mit beendeten Texten. Die Tage sind Kalendertage in der Zeitzone des Browsers: Der Server liefert die rohen
-  Durchgänge (`GET /api/me/progress`, höchstens 5000, eine Kürzung wird angezeigt), der Browser gruppiert sie. Das
-  Diagramm ist ein Inline-SVG ohne Bibliothek. Gelöschte Texte und vom 50-Durchgänge-Limit entfernte Durchgänge fehlen
-  auch hier.
+  mindestens eine Taste gedrückt wurde, auch ohne den Text zu beenden und auch, wenn sich ein Text über mehrere Tage
+  zieht. Maßgeblich ist der Kalendertag in der Zeitzone des Browsers beim Tippen, nicht der Zeitpunkt des Syncs: Wer
+  offline übt, verliert seinen Tag nicht. Wer heute noch nicht geübt hat, verliert die Serie erst um Mitternacht; bis
+  dahin weist die Startseite darauf hin. Dazu kommen zwei Kurven über die letzten 90 Tage: Anschläge/min (Median der
+  beendeten Durchgänge pro Tag) und Genauigkeit (über alle Anschläge des Tages). In die Kurven gehen nur Durchgänge
+  mit gemessener Tippzeit ohne Pausen ein. Ältere Durchgänge enthalten Pausen und ließen die Kurve springen. Die
+  x-Achse beginnt am ersten Tag mit Daten und zeigt mindestens eine Woche. Die Kurve erscheint ab zwei Tagen mit
+  beendeten Texten. Das Diagramm ist ein Inline-SVG ohne Bibliothek.
 * **Texte löschen:** Der Ersteller kann einen Text löschen. Dabei werden auch alle Tipp-Sitzungen aller Personen auf
   diesem Text gelöscht (mit Rückfrage). Wer den Text noch offline im Browser hat, bekommt beim nächsten Sync den
   Hinweis, dass der Text gelöscht wurde. Seine lokalen Daten zu diesem Text werden dann verworfen.
@@ -143,6 +142,10 @@ go run . -addr :8099 -origin http://localhost:8099 -db /tmp/e2e.db &
 * `texts.kind` ist `''` für selbst geschriebene Texte und `practice` für erzeugte Übungstexte (nachgerüstet wie
   `key_errors`).
 * `passkeys.label` und `passkeys.last_used_at` (wird bei jedem Login gesetzt) sind ebenfalls nachgerüstet.
+* `practice_days(user_id, day)` speichert die Übungstage für die Serie, getrennt von den Sitzungen. So verkürzt weder
+  das Limit von 50 Sitzungen pro Text noch das Löschen eines Texts eine Serie nachträglich. Beim ersten Start mit
+  dieser Tabelle wird sie aus den vorhandenen Sitzungen befüllt, mit dem UTC-Tag des letzten Syncs (etwas Besseres
+  gibt es für alte Daten nicht).
 * `auth_sessions` enthält die Login-Sitzungen. Gespeichert wird nur der SHA-256 des Cookie-Tokens.
 
 ### Texte
@@ -156,9 +159,9 @@ verwechselbare Zeichen (kein 0/o, 1/l/i).
 
 ### Sync-Protokoll
 
-`PUT /api/sessions/{client-uuid}` mit `{text_id, cursor_pos, error_count, cpm, started_at, finished_at, key_errors, active_ms}`.
+`PUT /api/sessions/{client-uuid}` mit `{text_id, cursor_pos, error_count, cpm, started_at, finished_at, key_errors, active_ms, practice_days}`.
 `active_ms` ist optional oder `null` und muss zwischen 0 und der verstrichenen Zeit liegen (1 Minute Toleranz).
-`key_errors` ist optional (ältere Clients senden es nicht). Jeder Schlüssel muss genau ein Zeichen sein, das im Text
+`practice_days` ist optional: die lokalen Tage (`YYYY-MM-DD`) mit Tastendrücken in dieser Sitzung, höchstens 100, jeder zwischen dem UTC-Tag vor `started_at` und dem UTC-Tag nach jetzt (Zeitzonen reichen von UTC−12 bis UTC+14). `key_errors` ist optional (ältere Clients senden es nicht). Jeder Schlüssel muss genau ein Zeichen sein, das im Text
 vorkommt, jeder Wert muss zwischen 1 und `error_count` liegen, und die Summe darf `error_count` nicht übersteigen.
 
 * Die Queue (`pending` in `localStorage`) hält pro Sitzung nur den letzten Stand (latest wins). Sie bleibt auch
@@ -218,7 +221,7 @@ letzten 60 s.
 | GET | `/api/texts/{id}` | jeder angemeldete Nutzer (Teilen per Link); bei Lektionen zusätzlich `next_lesson` |
 | GET | `/api/texts/{id}/sessions` | Live-Ansicht, nur für den Ersteller |
 | GET | `/api/lessons` | eingebaute Lektionen in Kursreihenfolge (`id`, `title`, `length`) |
-| GET | `/api/me/progress` | Sitzungen mit mindestens einem getippten Zeichen und Sync in den letzten 90 Tagen, neueste zuerst: `runs` (`updated_at`, `finished_at`, `cursor_pos`, `error_count`, `cpm`, `active_ms`), `days`, `limit`, `truncated` |
+| GET | `/api/me/progress` | `practice_days` (Übungstage der letzten 91 Tage, ein Tag Reserve für Zeitzonen) und `runs`: Sitzungen mit mindestens einem getippten Zeichen und Sync in den letzten 90 Tagen, neueste zuerst (`updated_at`, `finished_at`, `cursor_pos`, `error_count`, `cpm`, `active_ms`), höchstens `limit` = 5000, sonst `truncated`. Der Browser gruppiert nach lokalen Tagen, der Server kennt die Zeitzone nicht. |
 | GET | `/api/me/weak-keys` | Problemtasten: `keys` (`char`, `errors`, `attempts`, `rate`), `days`, `min_attempts` |
 | POST | `/api/me/practice` | erstellt einen Übungstext für die Problemtasten (201) oder 409, solange es keine gibt |
 | GET | `/api/texts/{id}/qr.svg` | QR-Code des Teilen-Links (`<origin>/t/{id}`) als SVG |

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -124,7 +125,7 @@ func TestMigrateAddsKeyErrors(t *testing.T) {
 	if _, err := db.Exec(`CREATE TABLE typing_sessions (id TEXT PRIMARY KEY, text_id TEXT NOT NULL, user_id TEXT NOT NULL,
 		cursor_pos INTEGER NOT NULL, error_count INTEGER NOT NULL, cpm INTEGER NOT NULL, started_at DATETIME NOT NULL,
 		updated_at DATETIME NOT NULL, finished_at DATETIME);
-		INSERT INTO typing_sessions VALUES('old','t','u',1,0,10,'2026-01-01','2026-01-01',NULL)`); err != nil {
+		INSERT INTO typing_sessions VALUES('old','t','u',0,0,10,'2026-01-01','2026-01-01',NULL)` /* cursor 0: user 'u' does not exist, the practice_days backfill would hit the FK */); err != nil {
 		t.Fatal(err)
 	}
 	db.Close()
@@ -167,7 +168,9 @@ func TestActivitySinceLimit(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	got, err := s.ActivitySince(ctx, u.ID, base.Add(30*time.Minute), 10)
+	// since in another zone than the stored UTC values: compared as an instant
+	berlin := time.FixedZone("CET", 3600)
+	got, err := s.ActivitySince(ctx, u.ID, base.Add(30*time.Minute).In(berlin), 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,5 +179,53 @@ func TestActivitySinceLimit(t *testing.T) {
 	}
 	if got, err = s.ActivitySince(ctx, u.ID, base, 1); err != nil || len(got) != 1 || got[0].CursorPos != 3 {
 		t.Fatalf("limit: %+v %v", got, err)
+	}
+}
+
+func TestPracticeDaysBackfill(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "old.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u := User{ID: NewID(), DisplayName: "u"}
+	if err := s.CreateUserWithPasskey(ctx, u, Passkey{ID: NewID(), PublicKey: []byte{1}, Credential: []byte("{}")}); err != nil {
+		t.Fatal(err)
+	}
+	txt, err := s.CreateText(ctx, u.ID, "t", "abc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, cursor := range []int{1, 0, 2} { // the untouched session (cursor 0) is not practice
+		s.now = func() time.Time { return time.Date(2026, 11, 10+i, 23, 0, 0, 0, time.UTC) }
+		if _, err := s.UpsertTypingSession(ctx, TypingSession{ID: NewID(), TextID: txt.ID, UserID: u.ID, CursorPos: cursor,
+			StartedAt: s.now()}, 50); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// simulate a database of the previous version
+	if _, err := s.db.Exec(`DROP TABLE practice_days`); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	if s, err = Open(path); err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	days, err := s.PracticeDaysSince(ctx, u.ID, "2026-01-01")
+	if err != nil || strings.Join(days, ",") != "2026-11-10,2026-11-12" {
+		t.Fatalf("backfilled days: %v %v", days, err)
+	}
+	// no second backfill: a day removed later stays removed
+	if _, err := s.db.Exec(`DELETE FROM practice_days WHERE day='2026-11-10'`); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+	if s, err = Open(path); err != nil {
+		t.Fatal(err)
+	}
+	if days, _ := s.PracticeDaysSince(ctx, u.ID, "2026-01-01"); strings.Join(days, ",") != "2026-11-12" {
+		t.Fatalf("backfill ran twice: %v", days)
 	}
 }

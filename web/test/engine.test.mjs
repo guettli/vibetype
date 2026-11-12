@@ -1,6 +1,9 @@
+// practice days are local days: pin the zone (Node resets its cache when TZ is assigned)
+process.env.TZ = 'Europe/Berlin';
+
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { newSession, chars, keyToChar, press, cpm, accuracy, syncPayload, MAX_CPM, MAX_GAP_MS, activeMs, wallMs, upgrade } from '../static/engine.js';
+import { newSession, chars, keyToChar, press, cpm, accuracy, syncPayload, MAX_CPM, MAX_DAYS, MAX_GAP_MS, activeMs, wallMs, upgrade } from '../static/engine.js';
 
 test('keyToChar', () => {
   assert.equal(keyToChar({ key: 'a' }), 'a');
@@ -34,7 +37,7 @@ test('stop on error, finish, stats', () => {
   assert.deepEqual(s.keyErrors, { b: 1 }); // the x was typed while "b" was due
   assert.deepEqual(syncPayload(s, t0), {
     text_id: 'tid', cursor_pos: 4, error_count: 1, cpm: 34,
-    started_at: '2026-01-01T00:00:00.000Z', finished_at: '2026-01-01T00:01:00.000Z', key_errors: { b: 1 }, active_ms: 7000,
+    started_at: '2026-01-01T00:00:00.000Z', finished_at: '2026-01-01T00:01:00.000Z', key_errors: { b: 1 }, practice_days: ['2026-01-01'], active_ms: 7000,
   });
 });
 
@@ -96,4 +99,24 @@ test('upgrade only touches unstarted old states', () => {
 
 test('chars counts code points', () => {
   assert.equal(chars('a😀b').length, 3);
+});
+
+test('practice days: local days with key presses, a session can span several', () => {
+  const text = chars('abcdef');
+  const s = newSession('sid', 'tid');
+  press(s, text, 'a', Date.parse('2026-11-11T22:30:00Z')); // 23:30 in Berlin
+  press(s, text, 'x', Date.parse('2026-11-11T23:30:00Z')); // 00:30 next day: errors count as practice too
+  press(s, text, 'b', Date.parse('2026-11-12T08:00:00Z'));
+  press(s, text, 'c', Date.parse('2026-11-13T08:00:00Z'));
+  assert.deepEqual(syncPayload(s, Date.parse('2026-11-13T09:00:00Z')).practice_days, ['2026-11-11', '2026-11-12', '2026-11-13']);
+  // states of older versions have no days
+  const old = { ...newSession('old', 'tid') };
+  delete old.days;
+  assert.deepEqual(syncPayload(old, 0).practice_days, []);
+  // at most MAX_DAYS, the newest are kept
+  const long = newSession('long', 'tid');
+  const t = chars('a'.repeat(MAX_DAYS + 5));
+  for (let i = 0; i < MAX_DAYS + 5; i++) press(long, t, 'a', Date.parse('2026-01-01T12:00:00Z') + i * 86400000);
+  assert.equal(long.days.length, MAX_DAYS);
+  assert.equal(long.days.at(-1), '2026-04-15');
 });

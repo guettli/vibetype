@@ -326,6 +326,8 @@ func (s *Server) syncSession(w http.ResponseWriter, r *http.Request) {
 		FinishedAt *time.Time     `json:"finished_at"`
 		KeyErrors  map[string]int `json:"key_errors"`
 		ActiveMS   *int64         `json:"active_ms"`
+		// local days (YYYY-MM-DD) with key presses; optional for older clients
+		PracticeDays []string `json:"practice_days"`
 	}
 	if !readJSON(w, r, &in) {
 		return
@@ -374,6 +376,10 @@ func (s *Server) syncSession(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if msg := validPracticeDays(in.PracticeDays, in.StartedAt, now); msg != "" {
+		httpError(w, http.StatusBadRequest, "invalid practice_days: "+msg)
+		return
+	}
 	if msg := validKeyErrors(in.KeyErrors, t.Content, in.ErrorCount); msg != "" {
 		httpError(w, http.StatusBadRequest, "invalid key_errors: "+msg)
 		return
@@ -387,7 +393,7 @@ func (s *Server) syncSession(w http.ResponseWriter, r *http.Request) {
 	ts, err := s.cfg.Store.UpsertTypingSession(r.Context(), store.TypingSession{
 		ID: id, TextID: t.ID, UserID: userFrom(r.Context()).ID,
 		CursorPos: in.CursorPos, ErrorCount: in.ErrorCount, CPM: in.CPM, KeyErrors: in.KeyErrors, ActiveMS: in.ActiveMS,
-		StartedAt: in.StartedAt.UTC(), FinishedAt: utcPtr(in.FinishedAt),
+		StartedAt: in.StartedAt.UTC(), FinishedAt: utcPtr(in.FinishedAt), PracticeDays: in.PracticeDays,
 	}, maxSessionsPerText)
 	if errors.Is(err, store.ErrNotFound) { // deleted concurrently
 		httpError(w, http.StatusNotFound, "text not found")
@@ -465,14 +471,36 @@ func (s *Server) myResults(w http.ResponseWriter, r *http.Request) {
 }
 
 const (
-	progressWindow = 90 * 24 * time.Hour
-	progressLimit  = 5000
+	progressWindow    = 90 * 24 * time.Hour
+	progressLimit     = 5000
+	maxPracticeDays   = 100 // per sync; a session typed on more days keeps its newest
+	practiceDayLayout = "2006-01-02"
 )
 
-// myProgress returns the caller's sessions of the last 90 days for the progress
-// chart. The client groups them by local day (the server does not know the
-// user's time zone). truncated tells the client that older sessions inside the
-// window were cut off by the limit.
+// validPracticeDays checks the local days a client reports for a session: each
+// a date, between the UTC day before started_at and the UTC day after now (time
+// zones span UTC-12 to UTC+14). Returns "" if valid.
+func validPracticeDays(days []string, startedAt, now time.Time) string {
+	if len(days) > maxPracticeDays {
+		return fmt.Sprintf("more than %d days", maxPracticeDays)
+	}
+	first := startedAt.UTC().AddDate(0, 0, -1).Format(practiceDayLayout)
+	last := now.UTC().AddDate(0, 0, 1).Format(practiceDayLayout)
+	for _, d := range days {
+		if p, err := time.Parse(practiceDayLayout, d); err != nil || p.Format(practiceDayLayout) != d {
+			return fmt.Sprintf("%q is not a YYYY-MM-DD date", d)
+		}
+		if d < first || d > last {
+			return fmt.Sprintf("%s is outside %s..%s", d, first, last)
+		}
+	}
+	return ""
+}
+
+// myProgress returns the caller's practice days and sessions of the last 90
+// days for the streak and the progress charts. The client groups the sessions
+// by local day (the server does not know the user's time zone). truncated tells
+// the client that older sessions inside the window were cut off by the limit.
 func (s *Server) myProgress(w http.ResponseWriter, r *http.Request) {
 	runs, err := s.cfg.Store.ActivitySince(r.Context(), userFrom(r.Context()).ID, s.now().Add(-progressWindow), progressLimit+1)
 	if err != nil {
@@ -483,7 +511,14 @@ func (s *Server) myProgress(w http.ResponseWriter, r *http.Request) {
 	if truncated {
 		runs = runs[:progressLimit]
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"runs": runs, "days": int(progressWindow.Hours() / 24),
+	// one extra day: the client's today may be a day ahead of or behind UTC
+	days, err := s.cfg.Store.PracticeDaysSince(r.Context(), userFrom(r.Context()).ID,
+		s.now().UTC().Add(-progressWindow).AddDate(0, 0, -1).Format(practiceDayLayout))
+	if err != nil {
+		s.internal(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"runs": runs, "practice_days": days, "days": int(progressWindow.Hours() / 24),
 		"limit": progressLimit, "truncated": truncated})
 }
 

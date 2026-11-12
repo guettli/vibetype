@@ -1,4 +1,5 @@
 // Pure typing engine (no DOM) – unit tested with `node --test web/test`.
+import { dayKey } from './progress.js';
 
 // newSession creates the local state of one typing run over `content`.
 export function newSession(id, textId) {
@@ -37,6 +38,10 @@ export function keyToChar(ev) {
 export function press(state, textChars, ch, now) {
   if (state.finishedAt || state.cursor >= textChars.length) return 'ignored';
   if (!state.startedAt) state.startedAt = new Date(now).toISOString();
+  // local days with key presses, for the practice streak (one session can span days)
+  const day = dayKey(new Date(now));
+  state.days ??= []; // sessions stored by older versions have no days
+  if (state.days.at(-1) !== day) state.days = [...state.days, day].slice(-MAX_DAYS);
   if (state.activeMs !== undefined && (state.countedKeys ?? 0) !== state.cursor + state.errors) {
     // Key presses happened without timing (an old-version tab, another tab on the
     // same text): the active time is incomplete, so this run uses wall time.
@@ -63,6 +68,9 @@ export function press(state, textChars, ch, now) {
   state.keyErrors[due] = (state.keyErrors[due] ?? 0) + 1;
   return 'error';
 }
+
+// The server accepts at most this many practice days per sync.
+export const MAX_DAYS = 100;
 
 // More is not humanly possible (world records are around 1000-1300); the server
 // clamps to the same value, so the client shows what the server stores.
@@ -113,6 +121,7 @@ export function syncPayload(state, now) {
     started_at: state.startedAt,
     finished_at: state.finishedAt,
     key_errors: state.keyErrors ?? {},
+    practice_days: state.days ?? [],
     // null = measured on wall-clock time (older states); not comparable with active-time runs
     active_ms: state.activeMs === undefined || !state.startedAt ? null : Math.round(activeMs(state, now)),
   };

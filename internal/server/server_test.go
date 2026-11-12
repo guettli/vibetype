@@ -655,10 +655,47 @@ func TestProgress(t *testing.T) {
 	if r := p.Runs[0]; r.FinishedAt != nil || r.CursorPos != 3 {
 		t.Fatalf("running run (newest first): %+v", r)
 	}
-	// 91 days later both runs are outside the window
-	e.srv.now = func() time.Time { return time.Now().Add(91 * 24 * time.Hour) }
-	if c := e.do(tok, "GET", "/api/me/progress", nil, &p); c != 200 || len(p.Runs) != 0 {
-		t.Fatalf("progress after 91 days: %d %+v", c, p)
+	// practice days: one session typed on three local days counts three times;
+	// the days survive deleting the text (and so pruning of sessions)
+	var other2 store.Text
+	if c := e.do(tok, "POST", "/api/texts", map[string]string{"title": "t2", "content": "xyz"}, &other2); c != 200 && c != 201 {
+		t.Fatalf("create: %d", c)
+	}
+	today := time.Now().UTC()
+	day := func(d int) string { return today.AddDate(0, 0, d).Format("2006-01-02") }
+	multi := func(days []string) int {
+		return e.do(tok, "PUT", "/api/sessions/progress-multiday", map[string]any{"text_id": other2.ID, "cursor_pos": 1, "error_count": 0,
+			"cpm": 10, "started_at": today.AddDate(0, 0, -3), "practice_days": days}, nil)
+	}
+	if c := multi([]string{day(-3), day(-2)}); c != 200 {
+		t.Fatalf("sync with practice days: %d", c)
+	}
+	if c := multi([]string{day(-3), day(-2), day(0)}); c != 200 {
+		t.Fatalf("sync with practice days: %d", c)
+	}
+	for _, bad := range [][]string{{"2026-1-5"}, {"gestern"}, {day(-5)}, {day(2)}, {"2026-02-30"}, make([]string, 101)} {
+		if c := multi(bad); c != 400 {
+			t.Errorf("practice_days %v: want 400, got %d", bad, c)
+		}
+	}
+	if c := e.do(tok, "DELETE", "/api/texts/"+other2.ID, nil, nil); c != 204 && c != 200 {
+		t.Fatalf("delete: %d", c)
+	}
+	var pd struct {
+		Days []string `json:"practice_days"`
+	}
+	if c := e.do(tok, "GET", "/api/me/progress", nil, &pd); c != 200 || strings.Join(pd.Days, ",") != strings.Join([]string{day(-3), day(-2), day(0)}, ",") {
+		t.Fatalf("practice days after deleting the text: %d %v", c, pd.Days)
+	}
+
+	// 93 days later everything is outside the window (practice days have one extra day for time zones)
+	e.srv.now = func() time.Time { return time.Now().Add(93 * 24 * time.Hour) }
+	var late struct {
+		Runs []store.Activity `json:"runs"`
+		Days []string         `json:"practice_days"`
+	}
+	if c := e.do(tok, "GET", "/api/me/progress", nil, &late); c != 200 || len(late.Runs) != 0 || len(late.Days) != 0 {
+		t.Fatalf("progress after 93 days: %d %+v", c, late)
 	}
 	if c := e.do("", "GET", "/api/me/progress", nil, nil); c != 401 {
 		t.Fatalf("progress without login: %d", c)

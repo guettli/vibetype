@@ -49,13 +49,13 @@ export function daily(runs, today, n) {
     .sort((a, b) => a.index - b.index);
 }
 
-// streak counts the days in a row with any typing (finished or not), by the
-// local day of the last sync. A streak that has not been continued today is
-// still current until the day is over: it counts from yesterday then.
-// capped is true if the streak reaches back to the start of the data window,
-// so it may be longer than shown.
-export function streak(runs, today, n) {
-  const active = new Set(runs.map((r) => dayKey(new Date(r.updated_at))));
+// streak counts the days in a row with any typing (finished or not); dayList
+// holds local days YYYY-MM-DD as recorded by the server. A streak that has not been
+// continued today is still current until the day is over: it counts from
+// yesterday then. capped is true if the streak reaches back to the start of the
+// window, so it may be longer than shown.
+export function streak(dayList, today, n) {
+  const active = new Set(dayList);
   const days = windowDays(today, n);
   const todayActive = active.has(days[n - 1]);
   let count = 0;

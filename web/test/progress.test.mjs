@@ -41,13 +41,17 @@ test('daily: median cpm and accuracy per day, only finished runs with active_ms'
 
 test('streak counts consecutive days, today optional', () => {
   const today = new Date(2026, 10, 13, 18);
-  const days = (...ds) => ds.map((d) => ({ updated_at: at(2026, 11, d), finished_at: null }));
-  assert.deepEqual(streak(days(13, 12, 11, 9), today, 90), { days: 3, today: true, capped: false, practiceDays: 4 });
-  assert.deepEqual(streak(days(12, 11), today, 90), { days: 2, today: false, capped: false, practiceDays: 2 });
-  assert.deepEqual(streak(days(11, 10), today, 90), { days: 0, today: false, capped: false, practiceDays: 2 });
+  const days = (...ds) => ds.map((d) => `2026-11-${String(d).padStart(2, '0')}`);
+  assert.deepEqual(streak(days(9, 11, 12, 13), today, 90), { days: 3, today: true, capped: false, practiceDays: 4 });
+  assert.deepEqual(streak(days(11, 12), today, 90), { days: 2, today: false, capped: false, practiceDays: 2 });
+  assert.deepEqual(streak(days(10, 11), today, 90), { days: 0, today: false, capped: false, practiceDays: 2 });
   assert.deepEqual(streak([], today, 90), { days: 0, today: false, capped: false, practiceDays: 0 });
-  assert.deepEqual(streak(days(13, 12, 11), today, 3), { days: 3, today: true, capped: true, practiceDays: 3 });
-  assert.deepEqual(streak(days(12, 11), today, 3), { days: 2, today: false, capped: true, practiceDays: 2 });
+  assert.deepEqual(streak(days(11, 12, 13), today, 3), { days: 3, today: true, capped: true, practiceDays: 3 });
+  assert.deepEqual(streak(days(11, 12), today, 3), { days: 2, today: false, capped: true, practiceDays: 2 });
+  // days outside the window (the server sends one extra) do not count
+  assert.deepEqual(streak(['2026-08-14', ...days(13)], today, 90), { days: 1, today: true, capped: false, practiceDays: 1 });
+  // across the DST change on 2026-10-25
+  assert.equal(streak(['2026-10-24', '2026-10-25', '2026-10-26'], new Date(2026, 9, 26, 0, 5), 90).days, 3);
 });
 
 test('niceScale', () => {
