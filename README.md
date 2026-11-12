@@ -7,6 +7,10 @@ jeder Nutzer kann Texte anlegen, per Link/Code teilen und sieht live, wer seinen
   automatisch die Live-Ansicht aller Tipp-Sitzungen auf diesem Text.
 * **Local-First:** Die Tipp-Logik läuft komplett im Browser. Ein Sync-Loop schickt den Fortschritt alle 3 s an den
   Server; offline wird gepuffert (`localStorage`), ein Service Worker hält die App-Shell vor.
+* **Pausen zählen nicht:** Anschläge/min beziehen sich auf die aktive Tippzeit. Eine Lücke zwischen zwei Anschlägen
+  zählt höchstens 3 Sekunden, eine Pause zum Lesen, Reden oder wegen der Schulglocke drückt also nicht die
+  Geschwindigkeit. Die Zusammenfassung zeigt Tippzeit und Pausenzeit getrennt. Die Spalte „Zeit“ in den Ergebnissen
+  ist die Gesamtdauer vom ersten bis zum letzten Anschlag.
 * **Stop-on-Error:** Bei einem Tippfehler bleibt der Cursor stehen und das Zeichen „wackelt“ rot, bis die richtige
   Taste kommt.
 * **Bildschirmtastatur mit Fingerhinweisen:** Unter dem Text zeigt eine Tastatur (QWERTZ oder QWERTY) die nächste

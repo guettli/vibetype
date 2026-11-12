@@ -3,7 +3,8 @@
 // newSession creates the local state of one typing run over `content`.
 export function newSession(id, textId) {
   // keyErrors: expected character -> number of wrong key presses while it was due
-  return { id, textId, cursor: 0, errors: 0, keyErrors: {}, startedAt: null, finishedAt: null };
+  // activeMs: typing time without pauses (see MAX_GAP_MS); lastKeyAt: ms timestamp of the last key press
+  return { id, textId, cursor: 0, errors: 0, keyErrors: {}, startedAt: null, finishedAt: null, activeMs: 0, lastKeyAt: null };
 }
 
 // chars splits a text into code points (the server counts runes, not UTF-16 units).
@@ -27,6 +28,10 @@ export function keyToChar(ev) {
 export function press(state, textChars, ch, now) {
   if (state.finishedAt || state.cursor >= textChars.length) return 'ignored';
   if (!state.startedAt) state.startedAt = new Date(now).toISOString();
+  if (state.activeMs !== undefined) { // undefined: state stored by an older version -> wall-clock time
+    if (state.lastKeyAt !== null) state.activeMs += Math.min(Math.max(now - state.lastKeyAt, 0), MAX_GAP_MS);
+    state.lastKeyAt = now;
+  }
   if (ch === textChars[state.cursor]) {
     state.cursor++;
     if (state.cursor === textChars.length) state.finishedAt = new Date(now).toISOString();
@@ -43,12 +48,28 @@ export function press(state, textChars, ch, now) {
 // clamps to the same value, so the client shows what the server stores.
 export const MAX_CPM = 3000;
 
-// cpm = correct characters per minute since the first key press, at most MAX_CPM.
+// A gap between two key presses counts at most this long, so a break (reading,
+// talking, the bell) does not ruin the speed. Up to 3 s is normal thinking time.
+export const MAX_GAP_MS = 3000;
+
+// wallMs is the time from the first key press to the end (or now).
+export function wallMs(state, now) {
+  if (!state.startedAt) return 0;
+  return (state.finishedAt ? Date.parse(state.finishedAt) : now) - Date.parse(state.startedAt);
+}
+
+// activeMs is the typing time without pauses; while typing, the running gap
+// counts up to MAX_GAP_MS. States of older versions fall back to wall time.
+export function activeMs(state, now) {
+  if (state.activeMs === undefined || !state.startedAt) return wallMs(state, now);
+  const running = state.finishedAt || state.lastKeyAt === null ? 0 : Math.min(Math.max(now - state.lastKeyAt, 0), MAX_GAP_MS);
+  return state.activeMs + running;
+}
+
+// cpm = correct characters per minute of active typing time, at most MAX_CPM.
 export function cpm(state, now) {
   if (!state.startedAt || state.cursor === 0) return 0;
-  const end = state.finishedAt ? Date.parse(state.finishedAt) : now;
-  const minutes = (end - Date.parse(state.startedAt)) / 60000;
-  if (minutes <= 0) return 0;
+  const minutes = activeMs(state, now) / 60000;
   return Math.min(MAX_CPM, Math.round(state.cursor / Math.max(minutes, 1 / 60))); // at least 1s to avoid silly peaks
 }
 

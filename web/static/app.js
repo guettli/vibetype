@@ -1,5 +1,5 @@
 // vibetype frontend – vanilla ES module, no build step.
-import { newSession, chars, keyToChar, press, cpm, accuracy, syncPayload, MAX_CPM } from './engine.js';
+import { newSession, chars, keyToChar, press, cpm, accuracy, syncPayload, MAX_CPM, activeMs, wallMs } from './engine.js';
 import { LAYOUTS, locate, hint, defaultLayout } from './keyboard.js';
 
 const SYNC_INTERVAL_MS = 3000;
@@ -704,6 +704,7 @@ async function typingView(textId) {
     $summary.hidden = !state.finishedAt;
     if (!state.finishedAt) return;
     const myCpm = cpm(state, Date.now());
+    const pauseMs = wallMs(state, 0) - activeMs(state, 0);
     const best = previousBest();
     let verdict = null;
     if (!best) verdict = serverRuns ? h('p', {}, 'Dein erstes Ergebnis für diesen Text.') : null; // offline: unknown
@@ -711,7 +712,8 @@ async function typingView(textId) {
     else verdict = h('p', {}, `Deine Bestleistung: ${best.cpm} Anschläge/min (${resultAccuracy(best)} % Genauigkeit).`);
     fill($summary, ...[
       h('h3', {}, 'Fertig!'),
-      h('p', {}, `${myCpm} Anschläge/min · ${accuracy(state)} % Genauigkeit · ${state.errors} Fehler · Zeit ${fmtDuration(Date.parse(state.finishedAt) - Date.parse(state.startedAt))}`),
+      h('p', {}, `${myCpm} Anschläge/min · ${accuracy(state)} % Genauigkeit · ${state.errors} Fehler · Tippzeit ${fmtDuration(activeMs(state, 0))}`,
+        pauseMs >= 1000 ? ` (dazu ${fmtDuration(pauseMs)} Pause, zählt nicht mit)` : ''),
       verdict,
       myCpm >= MAX_CPM ? h('p', { class: 'warn' }, `Mehr als ${MAX_CPM} Anschläge/min sind nicht realistisch, der Wert wurde auf ${MAX_CPM} begrenzt.`) : null,
       text.next_lesson ? h('p', {}, h('a', { href: '/t/' + text.next_lesson, 'data-link': true, class: 'next-lesson' }, 'Nächste Lektion →')) : null,
