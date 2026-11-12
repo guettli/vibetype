@@ -1,5 +1,6 @@
 // vibetype frontend – vanilla ES module, no build step.
 import { newSession, chars, keyToChar, press, cpm, accuracy, syncPayload } from './engine.js';
+import { LAYOUTS, locate, hint, defaultLayout } from './keyboard.js';
 
 const SYNC_INTERVAL_MS = 3000;
 const LIVE_INTERVAL_MS = 3000;
@@ -245,6 +246,80 @@ function loginView() {
   );
 }
 
+// ---------- on-screen keyboard ----------
+// Preferences are per browser (global, not per user): { keyboard: bool, layout: 'de'|'us' }
+
+function loadPrefs() {
+  const p = { keyboard: true, layout: defaultLayout(navigator.language), ...ls.get('prefs', {}) };
+  if (!LAYOUTS[p.layout]) p.layout = defaultLayout(navigator.language); // unknown id (old/new version, hand-edited)
+  return p;
+}
+
+// keyboardWidget returns { el, show(nextChar), wrong(typedChar) }.
+// refocus() is called whenever a control is done, so keystrokes go back to the text.
+function keyboardWidget(refocus) {
+  let prefs = loadPrefs();
+  const $kb = h('div', { class: 'kb', 'aria-hidden': 'true' });
+  const $hint = h('div', { class: 'kb-hint', 'aria-live': 'polite' });
+  const $toggle = h('input', { type: 'checkbox' });
+  const $layout = h('select', { 'aria-label': 'Tastaturlayout' }, Object.entries(LAYOUTS).map(([id, l]) => h('option', { value: id }, l.name)));
+  const el = h('div', { class: 'kb-wrap' },
+    h('div', { class: 'kb-controls muted' }, h('label', {}, $toggle, ' Tastatur anzeigen'), ' ', $layout),
+    $hint, $kb);
+  let keys = {};
+  let next = null;
+
+  function build() {
+    $toggle.checked = prefs.keyboard;
+    $layout.value = prefs.layout;
+    $layout.hidden = $kb.hidden = $hint.hidden = !prefs.keyboard;
+    keys = {};
+    $kb.replaceChildren(...LAYOUTS[prefs.layout].rows.map((row) => h('div', { class: 'kb-row' }, row.map((key) => {
+      const letter = !key.mod && key.shift && key.base.toUpperCase() === key.shift;
+      const label = key.mod ? key.label : key.id === 'Space' ? '' : key.id === 'Enter' ? '↵' : letter ? key.shift : key.base;
+      const $k = h('div', { class: `key f-${key.finger}${key.mod ? ' mod' : ''}${['f', 'j'].includes(key.id) ? ' bump' : ''}` },
+        !key.mod && key.shift && !letter ? h('span', { class: 'sub' }, key.shift) : null,
+        label,
+        key.altgr ? h('span', { class: 'alt' }, key.altgr) : null);
+      $k.style.flexGrow = String(key.width); // CSSOM is allowed by the CSP, style attributes are not
+      keys[key.id] = $k;
+      return $k;
+    }))));
+    show(next);
+  }
+  function show(ch) {
+    next = ch;
+    for (const $k of Object.values(keys)) $k.classList.remove('next');
+    if (ch === null || !prefs.keyboard) { $hint.textContent = ''; return; }
+    const loc = locate(ch, prefs.layout);
+    $hint.textContent = (ch === ' ' ? 'Leertaste' : ch === '\n' ? 'Enter' : `„${ch}“`) + ': ' + hint(ch, prefs.layout);
+    for (const step of loc ? loc.steps : []) {
+      keys[step.key]?.classList.add('next');
+      if (step.modifier) keys[step.modifier]?.classList.add('next');
+    }
+  }
+  function wrong(ch) {
+    const loc = prefs.keyboard && locate(ch, prefs.layout);
+    if (!loc) return;
+    const step = loc.steps[loc.steps.length - 1];
+    for (const id of [step.key, step.modifier]) {
+      const $k = id && keys[id];
+      if (!$k) continue;
+      $k.classList.remove('wrong');
+      void $k.offsetWidth;
+      $k.classList.add('wrong');
+    }
+  }
+  function save() { ls.set('prefs', prefs); }
+  $toggle.addEventListener('change', () => { prefs = { ...prefs, keyboard: $toggle.checked }; save(); build(); refocus(); });
+  $layout.addEventListener('change', () => { prefs = { ...prefs, layout: $layout.value }; save(); build(); refocus(); });
+  // closing the select with Esc or re-picking the same option fires no change event
+  $layout.addEventListener('blur', () => setTimeout(refocus));
+  $layout.addEventListener('keydown', (e) => { if (e.key === 'Escape') refocus(); });
+  build();
+  return { el, show, wrong };
+}
+
 // ---------- routing ----------
 
 let teardown = () => {};
@@ -341,6 +416,7 @@ async function typingView(textId) {
   const $rest = h('span', { class: 'rest' });
   const $typing = h('div', { class: 'typing', tabindex: 0 }, $done, $cur, $rest);
   const $stats = h('div', { class: 'stats' });
+  const kb = keyboardWidget(() => { if (document.activeElement !== $typing) $typing.focus(); });
   const $live = h('div', { class: 'live' });
   const shareUrl = `${location.origin}/t/${text.id}`;
 
@@ -349,6 +425,7 @@ async function typingView(textId) {
     $done.textContent = textChars.slice(0, state.cursor).join('');
     $cur.textContent = state.cursor < textChars.length ? display(textChars[state.cursor]) : '';
     $rest.textContent = textChars.slice(state.cursor + 1).join('');
+    kb.show(state.cursor < textChars.length ? textChars[state.cursor] : null);
     renderStats();
   }
   function renderStats() {
@@ -374,13 +451,13 @@ async function typingView(textId) {
   }
 
   function onKey(ev) {
-    if (document.activeElement && ['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName)) return;
+    if (document.activeElement && ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName)) return;
     const ch = keyToChar(ev);
     if (ch === null) return;
     ev.preventDefault(); // no page scroll on space, no Firefox quick-find on ' and /
     const result = press(state, textChars, ch, Date.now());
     if (result === 'ignored') return;
-    if (result === 'error') flash();
+    if (result === 'error') { flash(); kb.wrong(ch); }
     us.set(stateKey, state);
     enqueue(state); // dirty flag: picked up by the sync loop
     render();
@@ -444,6 +521,7 @@ async function typingView(textId) {
       ),
       $typing,
       $stats,
+      kb.el,
     ),
     ...(isCreator ? [h('section', { class: 'card' }, $live)] : []),
   );
