@@ -14,18 +14,21 @@ test('every printable ASCII character is on both layouts', () => {
 
 test('german specials', () => {
   for (const ch of 'äöüÄÖÜß€§°') assert.ok(locate(ch, 'de'), ch);
-  assert.equal(locate('é', 'de'), null);
+  assert.equal(locate('ñ', 'de'), null);
+  assert.equal(locate('é', 'us'), null);
   assert.equal(locate('ä', 'us'), null);
 });
 
 test('10-finger rules', () => {
-  assert.deepEqual(locate('f', 'de'), { key: 'f', finger: 'li', modifier: null });
-  assert.deepEqual(locate('F', 'de'), { key: 'f', finger: 'li', modifier: 'ShiftR' }); // other hand's shift
-  assert.deepEqual(locate('J', 'us'), { key: 'j', finger: 'ri', modifier: 'ShiftL' });
-  assert.deepEqual(locate('@', 'de'), { key: 'q', finger: 'lp', modifier: 'AltGr' });
-  assert.equal(locate('z', 'de').finger, 'ri');
-  assert.equal(locate('z', 'us').finger, 'lp');
-  assert.equal(locate(' ', 'de').finger, 'th');
+  const one = (ch, l) => { const { steps } = locate(ch, l); assert.equal(steps.length, 1, ch); return steps[0]; };
+  assert.deepEqual(one('f', 'de'), { ch: 'f', key: 'f', finger: 'li', modifier: null, dead: false });
+  assert.deepEqual(one('F', 'de'), { ch: 'F', key: 'f', finger: 'li', modifier: 'ShiftR', dead: false }); // other hand's shift
+  assert.equal(one('J', 'us').modifier, 'ShiftL');
+  assert.deepEqual(one('@', 'de'), { ch: '@', key: 'q', finger: 'lp', modifier: 'AltGr', dead: false });
+  assert.equal(one('z', 'de').finger, 'ri');
+  assert.equal(one('z', 'us').finger, 'lp');
+  assert.equal(one(' ', 'de').finger, 'th');
+  assert.equal(one('^', 'us').dead, false); // no dead keys on US
   assert.equal(hint('A', 'de'), 'linker kleiner Finger + rechte Umschalttaste (rechter kleiner Finger)');
 });
 
@@ -41,4 +44,22 @@ test('defaultLayout', () => {
   assert.equal(defaultLayout('de'), 'de');
   assert.equal(defaultLayout('en-US'), 'us');
   assert.equal(defaultLayout(undefined), 'us');
+});
+
+test('german dead keys', () => {
+  const keys = (ch) => locate(ch, 'de').steps.map((s) => `${s.modifier ?? ''}${s.key}`);
+  assert.deepEqual(keys('^'), ['Backquote', 'Space']);
+  assert.deepEqual(keys('´'), ['Equal', 'Space']);
+  assert.deepEqual(keys('`'), ['ShiftLEqual', 'Space']);
+  assert.deepEqual(keys('é'), ['Equal', 'e']);
+  assert.deepEqual(keys('À'), ['ShiftLEqual', 'ShiftRa']);
+  assert.deepEqual(keys('ô'), ['Backquote', 'o']);
+  for (const ch of 'áéíóúýàèìòùâêîôûÁÉÍÓÚÝÀÈÌÒÙÂÊÎÔÛ') assert.equal(locate(ch, 'de').steps.length, 2, ch);
+  assert.equal(hint('é', 'de'), '1. ´ (Tottaste): rechter kleiner Finger  2. e: linker Mittelfinger');
+});
+
+test('rows line up (15 units each)', () => {
+  for (const [id, l] of Object.entries(LAYOUTS)) {
+    for (const [i, row] of l.rows.entries()) assert.equal(row.reduce((a, k) => a + k.width, 0), 15, `${id} row ${i}`);
+  }
 });

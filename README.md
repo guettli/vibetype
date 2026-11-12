@@ -11,9 +11,12 @@ jeder Nutzer kann Texte anlegen, per Link/Code teilen und sieht live, wer seinen
   Taste kommt.
 * **Bildschirmtastatur mit Fingerhinweisen:** Unter dem Text zeigt eine Tastatur (QWERTZ oder QWERTY) die nächste
   Taste, die nötige Umschalt- bzw. AltGr-Taste und den Finger dafür („rechter Zeigefinger + linke Umschalttaste“). Die
-  Tasten sind nach Finger eingefärbt, F und J haben die Tastmarke. Eine falsch gedrückte Taste blinkt rot. Ein- und
-  Ausblenden sowie das Layout merkt sich der Browser. Voreinstellung: QWERTZ bei deutscher Browsersprache, sonst
-  QWERTY. Großschreibung folgt der 10-Finger-Regel: Shift drückt der kleine Finger der jeweils anderen Hand.
+  Tasten sind nach Finger eingefärbt, F und J haben die Tastmarke. Eine falsch gedrückte Taste blinkt rot, falls sie
+  auf dem gewählten Layout liegt. Ein- und Ausblenden sowie das Layout merkt sich der Browser. Voreinstellung:
+  QWERTZ bei deutscher Browsersprache (auch `de-CH`, ein Schweizer Layout gibt es noch nicht), sonst QWERTY.
+  Großschreibung folgt der 10-Finger-Regel: Shift drückt der kleine Finger der jeweils anderen Hand. Bei QWERTZ werden
+  Tottasten in zwei Schritten erklärt: `^` allein ist „^, dann Leertaste“, `é` ist „´, dann e“. Zeichen, die auf dem
+  Layout fehlen (z. B. ñ), zeigen „Taste nicht auf diesem Layout“.
 * **Passkeys:** Login per WebAuthn (discoverable credentials), ohne Passwort und ohne E-Mail. Sitzung per HTTP-only-Cookie.
 
 ## Stack

@@ -249,63 +249,73 @@ function loginView() {
 // ---------- on-screen keyboard ----------
 // Preferences are per browser (global, not per user): { keyboard: bool, layout: 'de'|'us' }
 
-function prefs() {
-  return { keyboard: true, layout: defaultLayout(navigator.language), ...ls.get('prefs', {}) };
+function loadPrefs() {
+  const p = { keyboard: true, layout: defaultLayout(navigator.language), ...ls.get('prefs', {}) };
+  if (!LAYOUTS[p.layout]) p.layout = defaultLayout(navigator.language); // unknown id (old/new version, hand-edited)
+  return p;
 }
-function setPref(key, value) { ls.set('prefs', { ...ls.get('prefs', {}), [key]: value }); }
 
 // keyboardWidget returns { el, show(nextChar), wrong(typedChar) }.
-function keyboardWidget() {
+// refocus() is called whenever a control is done, so keystrokes go back to the text.
+function keyboardWidget(refocus) {
+  let prefs = loadPrefs();
   const $kb = h('div', { class: 'kb', 'aria-hidden': 'true' });
-  const $hint = h('div', { class: 'kb-hint' });
+  const $hint = h('div', { class: 'kb-hint', 'aria-live': 'polite' });
   const $toggle = h('input', { type: 'checkbox' });
-  const $layout = h('select', {}, Object.entries(LAYOUTS).map(([id, l]) => h('option', { value: id }, l.name)));
+  const $layout = h('select', { 'aria-label': 'Tastaturlayout' }, Object.entries(LAYOUTS).map(([id, l]) => h('option', { value: id }, l.name)));
   const el = h('div', { class: 'kb-wrap' },
-    h('div', { class: 'kb-controls muted' },
-      h('label', {}, $toggle, ' Tastatur anzeigen'), ' ', $layout),
+    h('div', { class: 'kb-controls muted' }, h('label', {}, $toggle, ' Tastatur anzeigen'), ' ', $layout),
     $hint, $kb);
   let keys = {};
   let next = null;
 
   function build() {
-    const p = prefs();
-    $toggle.checked = p.keyboard;
-    $layout.value = p.layout;
-    $layout.hidden = !p.keyboard;
-    $kb.hidden = $hint.hidden = !p.keyboard;
+    $toggle.checked = prefs.keyboard;
+    $layout.value = prefs.layout;
+    $layout.hidden = $kb.hidden = $hint.hidden = !prefs.keyboard;
     keys = {};
-    $kb.replaceChildren(...LAYOUTS[p.layout].rows.map((row) => h('div', { class: 'kb-row' }, row.map((key) => {
-      const label = key.mod ? key.label : key.id === 'Space' ? '' : key.id === 'Enter' ? '↵' : (key.shift && key.base.toUpperCase() === key.shift ? key.shift : key.base);
+    $kb.replaceChildren(...LAYOUTS[prefs.layout].rows.map((row) => h('div', { class: 'kb-row' }, row.map((key) => {
+      const letter = !key.mod && key.shift && key.base.toUpperCase() === key.shift;
+      const label = key.mod ? key.label : key.id === 'Space' ? '' : key.id === 'Enter' ? '↵' : letter ? key.shift : key.base;
       const $k = h('div', { class: `key f-${key.finger}${key.mod ? ' mod' : ''}${['f', 'j'].includes(key.id) ? ' bump' : ''}` },
-        key.shift && key.base.toUpperCase() !== key.shift ? h('span', { class: 'sub' }, key.shift) : null,
-        label);
+        !key.mod && key.shift && !letter ? h('span', { class: 'sub' }, key.shift) : null,
+        label,
+        key.altgr ? h('span', { class: 'alt' }, key.altgr) : null);
       $k.style.flexGrow = String(key.width); // CSSOM is allowed by the CSP, style attributes are not
       keys[key.id] = $k;
       return $k;
     }))));
-    if (next !== null) show(next);
+    show(next);
   }
   function show(ch) {
     next = ch;
     for (const $k of Object.values(keys)) $k.classList.remove('next');
-    if (ch === null || !prefs().keyboard) { $hint.textContent = ''; return; }
-    const layout = prefs().layout;
-    const loc = locate(ch, layout);
-    $hint.textContent = (ch === ' ' ? 'Leertaste' : ch === '\n' ? 'Enter' : `„${ch}“`) + ': ' + hint(ch, layout);
-    if (!loc) return;
-    keys[loc.key]?.classList.add('next');
-    if (loc.modifier) keys[loc.modifier]?.classList.add('next');
+    if (ch === null || !prefs.keyboard) { $hint.textContent = ''; return; }
+    const loc = locate(ch, prefs.layout);
+    $hint.textContent = (ch === ' ' ? 'Leertaste' : ch === '\n' ? 'Enter' : `„${ch}“`) + ': ' + hint(ch, prefs.layout);
+    for (const step of loc ? loc.steps : []) {
+      keys[step.key]?.classList.add('next');
+      if (step.modifier) keys[step.modifier]?.classList.add('next');
+    }
   }
   function wrong(ch) {
-    const loc = prefs().keyboard && locate(ch, prefs().layout);
-    const $k = loc && keys[loc.key];
-    if (!$k) return;
-    $k.classList.remove('wrong');
-    void $k.offsetWidth;
-    $k.classList.add('wrong');
+    const loc = prefs.keyboard && locate(ch, prefs.layout);
+    if (!loc) return;
+    const step = loc.steps[loc.steps.length - 1];
+    for (const id of [step.key, step.modifier]) {
+      const $k = id && keys[id];
+      if (!$k) continue;
+      $k.classList.remove('wrong');
+      void $k.offsetWidth;
+      $k.classList.add('wrong');
+    }
   }
-  $toggle.addEventListener('change', () => { setPref('keyboard', $toggle.checked); build(); $toggle.blur(); });
-  $layout.addEventListener('change', () => { setPref('layout', $layout.value); build(); $layout.blur(); });
+  function save() { ls.set('prefs', prefs); }
+  $toggle.addEventListener('change', () => { prefs = { ...prefs, keyboard: $toggle.checked }; save(); build(); refocus(); });
+  $layout.addEventListener('change', () => { prefs = { ...prefs, layout: $layout.value }; save(); build(); refocus(); });
+  // closing the select with Esc or re-picking the same option fires no change event
+  $layout.addEventListener('blur', () => setTimeout(refocus));
+  $layout.addEventListener('keydown', (e) => { if (e.key === 'Escape') refocus(); });
   build();
   return { el, show, wrong };
 }
@@ -406,7 +416,7 @@ async function typingView(textId) {
   const $rest = h('span', { class: 'rest' });
   const $typing = h('div', { class: 'typing', tabindex: 0 }, $done, $cur, $rest);
   const $stats = h('div', { class: 'stats' });
-  const kb = keyboardWidget();
+  const kb = keyboardWidget(() => { if (document.activeElement !== $typing) $typing.focus(); });
   const $live = h('div', { class: 'live' });
   const shareUrl = `${location.origin}/t/${text.id}`;
 
