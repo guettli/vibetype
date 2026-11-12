@@ -77,7 +77,7 @@ await A.page.goto(`${BASE}/t/${slug}`);
 const B = await newUser('Bob'); step('Bob registered');
 await B.page.goto(`${BASE}/t/${slug}`);
 await B.page.waitForSelector('.typing');
-if (await B.page.$('.live')) throw new Error('Bob must not see live view');
+if (await B.page.$('.live') || await B.page.$('img.qr')) throw new Error('Bob must not see live view or load the QR code');
 // on-screen keyboard: "H" = right index finger + LEFT shift (other hand)
 await B.page.evaluate(() => localStorage.setItem('vt:prefs', JSON.stringify({ keyboard: true, layout: 'de' })));
 await B.page.reload();
@@ -106,6 +106,16 @@ step('stop-on-error works');
 await A.page.waitForSelector('tr.active:has-text("Bob"):has-text("41 %")', { timeout: 10000 });
 const row = await A.page.$eval('tr.active', (el) => el.innerText);
 step('Alice live view: ' + row.replace(/\s+/g, ' '));
+
+// classroom: QR code of the share link + presentation mode
+await A.page.waitForFunction(() => document.querySelector('img.qr')?.naturalWidth > 0);
+await A.page.click('text=Präsentieren');
+await A.page.waitForSelector('.live-card.present');
+await A.page.waitForSelector('text=Präsentation beenden');
+if (process.env.SHOT_DIR) await A.page.screenshot({ path: process.env.SHOT_DIR + '/present.png' });
+await A.page.click('text=Präsentation beenden');
+await A.page.waitForSelector('.live-card:not(.present)');
+step('QR code loads, presentation mode toggles');
 
 await B.ctx.setOffline(true);
 await B.page.keyboard.type(' "Welt"');

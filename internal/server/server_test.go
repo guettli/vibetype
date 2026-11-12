@@ -470,3 +470,24 @@ func TestWeakKeysAndPractice(t *testing.T) {
 		t.Fatalf("old client: %d", c)
 	}
 }
+
+func TestQR(t *testing.T) {
+	e := newEnv(t)
+	_, tok := e.login("Quinn")
+	var txt store.Text
+	e.do(tok, "POST", "/api/texts", map[string]string{"title": "t", "content": "abc"}, &txt)
+	req, _ := http.NewRequest("GET", e.ts.URL+"/api/texts/"+txt.ID+"/qr.svg", nil)
+	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: tok})
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(res.Body)
+	res.Body.Close()
+	if res.StatusCode != 200 || res.Header.Get("Content-Type") != "image/svg+xml" || !strings.HasPrefix(string(body), "<svg") || !strings.Contains(string(body), "M4 4h1v1h-1z") {
+		t.Fatalf("qr: %d %s %.80s", res.StatusCode, res.Header.Get("Content-Type"), body)
+	}
+	if c := e.do(tok, "GET", "/api/texts/nope42/qr.svg", nil, nil); c != 404 {
+		t.Fatalf("qr of unknown text: %d", c)
+	}
+}
