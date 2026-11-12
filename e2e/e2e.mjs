@@ -43,7 +43,7 @@ step('Alice logout + passkey login (discoverable)');
 await A.page.goto(BASE + '/');
 await A.page.waitForSelector('ol.lessons li a');
 const lessonCount = await A.page.$$eval('ol.lessons li', (els) => els.length);
-if (lessonCount !== 12) throw new Error('lessons: ' + lessonCount);
+if (lessonCount !== 13) throw new Error('lessons: ' + lessonCount);
 await A.page.click('ol.lessons li a >> nth=0');
 await A.page.waitForURL(/\/t\/lek01$/);
 await A.page.waitForSelector('.typing');

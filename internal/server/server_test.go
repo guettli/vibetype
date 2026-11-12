@@ -261,8 +261,12 @@ func TestHardening(t *testing.T) {
 			t.Fatalf("session %d: %d", i, c)
 		}
 	}
-	if c := put("session-too-many", nil); c != 429 {
-		t.Errorf("session limit: %d", c)
+	if c := put("session-one-more", nil); c != 200 {
+		t.Errorf("session beyond the limit must prune, not fail: %d", c)
+	}
+	var all struct{ Results []store.Result }
+	if e.do(tok, "GET", "/api/me/results", nil, &all); len(all.Results) != maxSessionsPerText {
+		t.Errorf("sessions after pruning: %d", len(all.Results))
 	}
 }
 
@@ -324,10 +328,11 @@ func TestResultsAndDelete(t *testing.T) {
 
 func TestLessons(t *testing.T) {
 	e := newEnv(t)
-	if err := SeedLessons(context.Background(), e.st); err != nil {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	if err := SeedLessons(context.Background(), e.st, logger); err != nil {
 		t.Fatal(err)
 	}
-	if err := SeedLessons(context.Background(), e.st); err != nil { // idempotent
+	if err := SeedLessons(context.Background(), e.st, logger); err != nil { // idempotent
 		t.Fatalf("second seed: %v", err)
 	}
 	_, tok := e.login("Lena")
@@ -349,29 +354,39 @@ func TestLessons(t *testing.T) {
 		t.Fatalf("next lesson: %+v", withNext)
 	}
 	withNext.NextLesson = ""
-	if e.do(tok, "GET", "/api/texts/lek12", nil, &withNext); withNext.NextLesson != "" {
+	if e.do(tok, "GET", "/api/texts/lek13", nil, &withNext); withNext.NextLesson != "" {
 		t.Fatalf("last lesson has no next: %+v", withNext)
 	}
 	if c := e.do(tok, "DELETE", "/api/texts/lek01", nil, nil); c != 403 {
 		t.Fatalf("users must not delete lessons: %d", c)
 	}
-	// a lesson that got shorter clamps existing cursors
+	// changed lesson content resets its sessions; removed lessons disappear
 	n := utf8.RuneCountInString(txt.Content)
 	if c := e.do(tok, "PUT", "/api/sessions/session-lesson", map[string]any{"text_id": "lek01", "cursor_pos": n, "error_count": 0, "cpm": 100,
 		"started_at": time.Now().Add(-time.Minute)}, nil); c != 200 {
 		t.Fatalf("sync: %d", c)
 	}
-	if err := e.st.SeedTexts(context.Background(), lessons.SystemUserID, lessons.SystemUserName, []store.SeedText{{ID: "lek01", Title: "x", Content: "asdf"}}); err != nil {
-		t.Fatal(err)
+	if deleted, err := e.st.SeedTexts(context.Background(), lessons.SystemUserID, lessons.SystemUserName, []store.SeedText{{ID: "lek01", Title: "x", Content: "asdf"}}); err != nil || deleted != 1 {
+		t.Fatalf("reseed: %d %v", deleted, err)
 	}
 	var res struct{ Results []store.Result }
-	if c := e.do(tok, "GET", "/api/me/results?text_id=lek01", nil, &res); c != 200 || len(res.Results) != 1 || res.Results[0].CursorPos != 4 {
-		t.Fatalf("clamped cursor: %d %+v", c, res.Results)
+	if c := e.do(tok, "GET", "/api/me/results?text_id=lek01", nil, &res); c != 200 || len(res.Results) != 0 {
+		t.Fatalf("sessions of changed lesson: %d %+v", c, res.Results)
+	}
+	if c := e.do(tok, "GET", "/api/texts/lek02", nil, nil); c != 404 {
+		t.Fatalf("lesson removed from the course must be gone: %d", c)
 	}
 	// a user text can never be overwritten by the seeder
 	var mine store.Text
 	e.do(tok, "POST", "/api/texts", map[string]string{"title": "t", "content": "abc"}, &mine)
-	if err := e.st.SeedTexts(context.Background(), lessons.SystemUserID, lessons.SystemUserName, []store.SeedText{{ID: mine.ID, Title: "x", Content: "y"}}); err == nil {
+	if _, err := e.st.SeedTexts(context.Background(), lessons.SystemUserID, lessons.SystemUserName, []store.SeedText{{ID: mine.ID, Title: "x", Content: "y"}}); err == nil {
 		t.Fatal("seeding over a user text must fail")
+	}
+}
+
+func TestReservedName(t *testing.T) {
+	e := newEnv(t)
+	if c := e.do("", "POST", "/api/register/begin", map[string]string{"display_name": " VibeType "}, nil); c != 400 {
+		t.Fatalf("reserved name: %d", c)
 	}
 }

@@ -359,10 +359,6 @@ func (s *Server) syncSession(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusNotFound, "text not found")
 		return
 	}
-	if errors.Is(err, store.ErrLimit) {
-		httpError(w, http.StatusTooManyRequests, fmt.Sprintf("more than %d typing sessions on this text", maxSessionsPerText))
-		return
-	}
 	if errors.Is(err, store.ErrForbidden) {
 		httpError(w, http.StatusForbidden, "session belongs to another user or text")
 		return
@@ -455,10 +451,14 @@ func (s *Server) listLessons(w http.ResponseWriter, r *http.Request) {
 }
 
 // SeedLessons stores the built-in lessons (idempotent, run at startup).
-func SeedLessons(ctx context.Context, st *store.Store) error {
+func SeedLessons(ctx context.Context, st *store.Store, logger *slog.Logger) error {
 	seed := make([]store.SeedText, 0, len(lessons.All))
 	for _, l := range lessons.All {
 		seed = append(seed, store.SeedText{ID: l.ID, Title: l.Title, Content: l.Content})
 	}
-	return st.SeedTexts(ctx, lessons.SystemUserID, lessons.SystemUserName, seed)
+	deleted, err := st.SeedTexts(ctx, lessons.SystemUserID, lessons.SystemUserName, seed)
+	if deleted > 0 {
+		logger.Warn("lessons changed: deleted typing sessions that referred to the old content", "sessions", deleted)
+	}
+	return err
 }

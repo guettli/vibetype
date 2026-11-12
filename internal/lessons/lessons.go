@@ -36,7 +36,7 @@ gag hah gag hah
 gas glas hals half hass
 lag sag fahl kahl gas
 das glas als lass hals
-half das glas als lag ja`,
+das glas lag da`,
 	},
 	{
 		ID: "lek03", Title: "Lektion 3: e und i", NewKeys: "ei",
@@ -46,15 +46,15 @@ alle elf idee kiel kies
 hilfe seife eile heide seide
 sie sah die fee
 sie lief leise als die geige fiel
-die idee gefiel sie`,
+die fee lief leise`,
 	},
 	{
 		ID: "lek04", Title: "Lektion 4: r und u", NewKeys: "ru",
 		Content: `fr ju fr ju frf juj frf juj
 rad uhr rufe raus kurs
 regel ruhig frage erde lauf
-kauf grau faul hause fuss
-der rasse rad lief raus
+kauf grau faul hause fuhr
+der hase lief raus
 sie rief ihr ruhig aus der luke
 aus der erde rief er hilfe`,
 	},
@@ -66,7 +66,7 @@ salz jetzt tasse zug zahl
 herz stadt letzte zahl tat
 der tag hat zeit
 jetzt ist die katze ruhig
-sie trat auf die tasse aus salz`,
+der hase sitzt still`,
 	},
 	{
 		ID: "lek06", Title: "Lektion 6: o und w", NewKeys: "ow",
@@ -85,7 +85,7 @@ mann name morgen nein nun
 immer mond nase man mit
 am morgen, am mittag, um zehn.
 nein, nun ist es zu warm.
-immer wenn der mond an ist, sind wir da.
+immer wenn der mond da ist, ist es still.
 der mann nimmt die tasse, dann geht er.`,
 	},
 	{
@@ -110,7 +110,7 @@ Der Text ist lang, aber sehr schön.`,
 	},
 	{
 		ID: "lek10", Title: "Lektion 10: p, ü, ä, q, ß", NewKeys: "püäqß",
-		Content: `öp öü öä aq ßß öp öü öä aq ßß
+		Content: `öp öü öä aq öß öp öü öä aq öß
 über für müde spät quelle
 quer straße fuß groß weiß
 platz papier äpfel ärger süß
@@ -124,21 +124,29 @@ Später essen wir süße Äpfel im Park.`,
 12 34 56 78 90 10 20 30
 11 22 33 44 55 66 77 88 99 00
 Ein Jahr hat 365 Tage und 12 Monate.
-Im Jahr 2026 ist der Kurs um 8 Uhr.
+Der Kurs beginnt um 8 Uhr.
 Wir sind 25 Kinder in 3 Gruppen.
 Der Zug fährt um 14.30 Uhr ab Gleis 7.`,
 	},
 	{
-		ID: "lek12", Title: "Lektion 12: Satzzeichen und Sonderzeichen", NewKeys: `!?"'-()/:;&%$€@#+*=_<>`,
+		ID: "lek12", Title: "Lektion 12: Satzzeichen", NewKeys: `!?"'-():;/`,
 		Content: `Wie geht es dir? Gut, danke!
 "Hallo", sagte sie. 'Hallo', sagte er.
 Es ist 10:30 Uhr; wir sind da.
 Das Haus (das alte) ist leer.
-50 % von 20 € sind 10 €, 5 $ sind wenig.
-Schreib an info@example.org oder nutze #vibetype.
+Das ist ein Wort - und noch eins.
+Kommst du mit? Ja! Nein? Doch!
+Die Datei liegt in kurs/eins/text.`,
+	},
+	{
+		ID: "lek13", Title: "Lektion 13: Sonderzeichen und AltGr", NewKeys: "&%$€@#+*=_<>",
+		Content: `50 % von 20 € sind 10 €.
+Ein Buch kostet 12 $ oder 11 €.
+Schreib an info@example.org.
+Das Thema ist #vibetype.
 Rechne: 3 + 4 = 7 und 2 * 6 = 12.
-Mehr oder weniger: 3 < 5 und 9 > 7.
-Datei: kurs_eins/text-2.txt & Co.`,
+3 < 5 und 9 > 7.
+Max & Moritz schreiben kurs_eins.`,
 	},
 }
 

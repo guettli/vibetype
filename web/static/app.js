@@ -1,5 +1,5 @@
 // vibetype frontend – vanilla ES module, no build step.
-import { newSession, chars, keyToChar, press, cpm, accuracy, syncPayload } from './engine.js';
+import { newSession, chars, keyToChar, press, cpm, accuracy, syncPayload, MAX_CPM } from './engine.js';
 import { LAYOUTS, locate, hint, defaultLayout } from './keyboard.js';
 
 const SYNC_INTERVAL_MS = 3000;
@@ -64,8 +64,14 @@ class ApiError extends Error {
   constructor(status, message) { super(message); this.status = status; }
 }
 
+const API_TIMEOUT_MS = 15000;
+
 async function api(method, path, body) {
+  // A request without a timeout can hang forever on a half-open connection and
+  // with it everything that awaits a sync (logout, the home page). A timeout
+  // rejects like a network error, i.e. counts as offline.
   const res = await fetch(path, {
+    signal: AbortSignal.timeout(API_TIMEOUT_MS),
     method,
     headers: body === undefined ? {} : { 'Content-Type': 'application/json' },
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -121,13 +127,18 @@ function enqueue(state) {
   us.set('pending', pending);
 }
 
-// flush sends all pending states. Calls are serialized: a call made while a sync
-// is running waits for it and then syncs again, so `await flush()` guarantees that
-// everything queued before the call has been sent (or failed).
-let flushQueue = Promise.resolve();
+// flush sends all pending states. A call made while a sync is running does not
+// start a second one; it marks "run again" and gets the running promise, which
+// settles only after that extra round. So `await flush()` means everything queued
+// before the call was sent (or failed), and calls never pile up.
+let flushRun = null;
+let flushAgain = false;
 function flush() {
-  flushQueue = flushQueue.then(flushOnce, flushOnce);
-  return flushQueue;
+  if (flushRun) { flushAgain = true; return flushRun; }
+  flushRun = (async () => {
+    do { flushAgain = false; await flushOnce(); } while (flushAgain);
+  })().finally(() => { flushRun = null; });
+  return flushRun;
 }
 
 async function flushOnce() {
@@ -495,6 +506,12 @@ async function loadResults($el, resultsReq) {
 async function loadText(id) {
   try {
     const t = await api('GET', '/api/texts/' + id);
+    const cached = us.get('text:' + id);
+    if (cached && cached.content !== t.content) {
+      // the text changed on the server (e.g. an updated lesson): local progress refers to the old text
+      forgetText(id);
+      fail(`Der Text „${t.title}“ wurde geändert. Dein lokaler Fortschritt darauf wurde zurückgesetzt.`);
+    }
     us.set('text:' + id, t);
     return t;
   } catch (err) {
@@ -576,6 +593,7 @@ async function typingView(textId) {
       h('h3', {}, 'Fertig!'),
       h('p', {}, `${myCpm} Anschläge/min · ${accuracy(state)} % Genauigkeit · ${state.errors} Fehler · Zeit ${fmtDuration(Date.parse(state.finishedAt) - Date.parse(state.startedAt))}`),
       verdict,
+      myCpm >= MAX_CPM ? h('p', { class: 'warn' }, `Mehr als ${MAX_CPM} Anschläge/min sind nicht realistisch, der Wert wurde auf ${MAX_CPM} begrenzt.`) : null,
       text.next_lesson ? h('p', {}, h('a', { href: '/t/' + text.next_lesson, 'data-link': true, class: 'next-lesson' }, 'Nächste Lektion →')) : null,
     ].filter(Boolean));
   }

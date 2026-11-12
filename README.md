@@ -17,13 +17,16 @@ jeder Nutzer kann Texte anlegen, per Link/Code teilen und sieht live, wer seinen
   Großschreibung folgt der 10-Finger-Regel: Shift drückt der kleine Finger der jeweils anderen Hand. Bei QWERTZ werden
   Tottasten in zwei Schritten erklärt: `^` allein ist „^, dann Leertaste“, `é` ist „´, dann e“. Zeichen, die auf dem
   Layout fehlen (z. B. ñ), zeigen „Taste nicht auf diesem Layout“.
-* **Lektionen:** Ein eingebauter Kurs mit 12 Lektionen für die deutsche QWERTZ-Tastatur. Er beginnt mit der
+* **Lektionen:** Ein eingebauter Kurs mit 13 Lektionen für die deutsche QWERTZ-Tastatur. Er beginnt mit der
   Grundreihe (asdf jklö) und führt dann Lektion für Lektion neue Tasten ein: obere und untere Reihe, Großbuchstaben,
   Zahlen, Satz- und Sonderzeichen. Jede Lektion nutzt nur Tasten, die vorher schon eingeführt wurden. Das prüft
-  [lessons_test.go](internal/lessons/lessons_test.go). Die Lektionen sind normale Texte (IDs `lek01`…`lek12`) eines
+  [lessons_test.go](internal/lessons/lessons_test.go). Die Lektionen sind normale Texte (IDs `lek01`…`lek13`) eines
   Systemnutzers „vibetype“, der sich nicht anmelden kann. Der Server legt sie beim Start an bzw. aktualisiert sie.
-  Wird eine Lektion kürzer, werden die Cursor bestehender Sitzungen gekappt. Abgeschlossene Lektionen zeigt die
-  Startseite mit ✓ und der Bestleistung. Nach dem Abschluss führt ein Link zur nächsten Lektion.
+  Ändert sich der Inhalt einer Lektion, löscht der Server beim Start die Sitzungen darauf (mit Warnung im Log). Der
+  Browser merkt beim nächsten Laden, dass sich der Text geändert hat, setzt den lokalen Fortschritt zurück und sagt
+  das. Lektionen, die aus dem Kurs entfernt wurden, verschwinden samt Sitzungen. Abgeschlossene Lektionen zeigt die
+  Startseite mit ✓ und der Bestleistung. Nach dem Abschluss führt ein Link zur nächsten Lektion. Der Anzeigename
+  „vibetype“ ist reserviert, damit kein Nutzer offiziell wirkt.
 * **Eigene Ergebnisse:** Die Startseite listet die letzten 200 eigenen Tipp-Durchgänge, auch nicht beendete (Datum,
   Text, Fortschritt, Anschläge/min, Fehler, Genauigkeit, Zeit). Die Bestleistung pro Text (beendet, höchste
   Anschläge/min) ist mit ★ markiert. Der Server berechnet sie über alle Durchgänge, nicht nur über die angezeigten.
@@ -117,14 +120,15 @@ verwechselbare Zeichen (kein 0/o, 1/l/i).
   einmal gesetzt. Doppelte oder vertauschte Requests verfälschen den Fortschritt deshalb nicht. `cpm` übernimmt der
   Server nur aus Requests, deren `cursor_pos` nicht kleiner als der gespeicherte Wert ist. `updated_at` ist immer
   Serverzeit.
-* Der Server prüft: Sitzung gehört dem Nutzer und dem Text, `cursor_pos ≤ Textlänge`, `cpm` nicht negativ (Werte über 3000 werden auf 3000 gekappt und geloggt, damit der Fortschritt nicht verloren geht), `started_at`
+* Der Server prüft: Sitzung gehört dem Nutzer und dem Text, `cursor_pos ≤ Textlänge`, `cpm` nicht negativ (Werte über 3000 kappt der Server auf 3000 und loggt sie, damit der Fortschritt nicht verloren geht. Der Client kappt genauso und weist in der Zusammenfassung darauf hin), `started_at`
   liegt nicht in der Zukunft, `finished_at` nur am Textende und nach `started_at`, höchstens 50 Sitzungen pro Nutzer
-  und Text (sonst 429).
+  und Text. Bei mehr löscht der Server die ältesten, die beste beendete Sitzung bleibt aber immer erhalten. So kann man
+  eine Lektion beliebig oft wiederholen.
 * Ein 404 beim Sync bedeutet, dass der Text gelöscht wurde. Die App verwirft dann alle lokalen Daten zu diesem Text und
   sagt das dem Nutzer. Löscht jemand den Text, während ein Sync läuft, prüft der Server das innerhalb der Transaktion
   und antwortet ebenfalls mit 404.
 * Fehlerverhalten: Netzwerkfehler sowie 502/503/504 vom Reverse-Proxy (Backend startet neu) → „offline“, erneuter
-  Versuch. 401 → Hinweis „neu anmelden“, Stand bleibt erhalten. Andere 5xx und 429 → Fehlermeldung, erneuter Versuch.
+  Versuch. 401 → Hinweis „neu anmelden“, Stand bleibt erhalten. Andere 5xx und 429 → Fehlermeldung, erneuter Versuch. Jeder Request hat ein Timeout von 15 s und zählt danach als offline. Gleichzeitige Sync-Aufrufe werden zusammengefasst, nicht gestapelt.
   Andere 4xx → Fehlermeldung, der Stand wird verworfen (ein erneuter Versuch kann nicht helfen).
 * Liefert der Proxy bei einem Seitenaufruf 5xx, antwortet der Service Worker mit der gecachten App-Shell.
 

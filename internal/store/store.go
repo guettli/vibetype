@@ -20,9 +20,6 @@ var ErrNotFound = errors.New("not found")
 // ErrForbidden is returned when a row belongs to another user.
 var ErrForbidden = errors.New("forbidden")
 
-// ErrLimit is returned when a per-user quota is exhausted.
-var ErrLimit = errors.New("limit reached")
-
 const schema = `
 CREATE TABLE IF NOT EXISTS users (
 	id           TEXT PRIMARY KEY,
@@ -311,7 +308,9 @@ type TypingSession struct {
 // Progress never goes backwards: cursor_pos and error_count keep their maximum,
 // because sync requests may arrive out of order after a network outage.
 // updated_at is always set to the server time.
-// A new session is refused with ErrLimit if the user already has maxPerUser
+// A user keeps at most maxPerUser sessions per text (0 = unlimited): when a new
+// session would exceed that, the oldest sessions are deleted, except the user's
+// best finished one. So repeating a lesson forever works and storage stays bounded.
 // sessions on this text (0 = unlimited).
 func (s *Store) UpsertTypingSession(ctx context.Context, ts TypingSession, maxPerUser int) (TypingSession, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -343,7 +342,14 @@ func (s *Store) UpsertTypingSession(ctx context.Context, ts TypingSession, maxPe
 			return ts, err
 		}
 		if n >= maxPerUser {
-			return ts, ErrLimit
+			if _, err := tx.ExecContext(ctx, `DELETE FROM typing_sessions WHERE id IN (
+					SELECT id FROM typing_sessions WHERE text_id=? AND user_id=? AND id NOT IN (
+						SELECT id FROM typing_sessions WHERE text_id=? AND user_id=? AND finished_at IS NOT NULL
+						ORDER BY cpm DESC, finished_at ASC LIMIT 1)
+					ORDER BY started_at ASC LIMIT ?)`,
+				ts.TextID, ts.UserID, ts.TextID, ts.UserID, n-maxPerUser+1); err != nil {
+				return ts, fmt.Errorf("prune old sessions: %w", err)
+			}
 		}
 	}
 	ts.UpdatedAt = s.now()
@@ -505,36 +511,81 @@ func (s *Store) BestResults(ctx context.Context, userID string) ([]Best, error) 
 type SeedText struct{ ID, Title, Content string }
 
 // SeedTexts creates the system user and creates or updates the given texts
-// under fixed ids. If a text got shorter, cursors of existing sessions are
-// clamped so they stay valid. Idempotent; run at startup.
-func (s *Store) SeedTexts(ctx context.Context, userID, userName string, texts []SeedText) error {
+// under fixed ids. If a text's content changed, its sessions are deleted (their
+// progress refers to the old text; clients reset their local state when they
+// see the new content). Texts of the system user that are not in texts any
+// more are deleted with their sessions. Idempotent; run at startup. It returns
+// the number of deleted sessions so the caller can log it.
+func (s *Store) SeedTexts(ctx context.Context, userID, userName string, texts []SeedText) (int64, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer tx.Rollback()
 	now := s.now()
 	if _, err := tx.ExecContext(ctx, `INSERT INTO users(id, display_name, created_at) VALUES(?,?,?)
 		ON CONFLICT(id) DO UPDATE SET display_name=excluded.display_name`, userID, userName, now); err != nil {
-		return fmt.Errorf("seed user: %w", err)
+		return 0, fmt.Errorf("seed user: %w", err)
 	}
+	var deleted int64
+	keep := map[string]bool{}
 	for _, t := range texts {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO texts(id, creator_id, title, content, created_at) VALUES(?,?,?,?,?)
-			ON CONFLICT(id) DO UPDATE SET title=excluded.title, content=excluded.content
-			WHERE creator_id=excluded.creator_id`, t.ID, userID, t.Title, t.Content, now); err != nil {
-			return fmt.Errorf("seed text %s: %w", t.ID, err)
+		keep[t.ID] = true
+		var creator, oldContent string
+		err := tx.QueryRowContext(ctx, `SELECT creator_id, content FROM texts WHERE id=?`, t.ID).Scan(&creator, &oldContent)
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			if _, err := tx.ExecContext(ctx, `INSERT INTO texts(id, creator_id, title, content, created_at) VALUES(?,?,?,?,?)`,
+				t.ID, userID, t.Title, t.Content, now); err != nil {
+				return 0, fmt.Errorf("seed text %s: %w", t.ID, err)
+			}
+			continue
+		case err != nil:
+			return 0, err
+		case creator != userID:
+			return 0, fmt.Errorf("seed text %s: id is taken by a text of user %s", t.ID, creator)
 		}
-		var creator string
-		if err := tx.QueryRowContext(ctx, `SELECT creator_id FROM texts WHERE id=?`, t.ID).Scan(&creator); err != nil {
-			return err
+		if oldContent != t.Content {
+			res, err := tx.ExecContext(ctx, `DELETE FROM typing_sessions WHERE text_id=?`, t.ID)
+			if err != nil {
+				return 0, fmt.Errorf("reset sessions of %s: %w", t.ID, err)
+			}
+			n, _ := res.RowsAffected()
+			deleted += n
 		}
-		if creator != userID {
-			return fmt.Errorf("seed text %s: id is taken by a text of user %s", t.ID, creator)
-		}
-		if _, err := tx.ExecContext(ctx, `UPDATE typing_sessions SET cursor_pos=length(?) WHERE text_id=? AND cursor_pos > length(?)`,
-			t.Content, t.ID, t.Content); err != nil {
-			return fmt.Errorf("clamp sessions of %s: %w", t.ID, err)
+		if _, err := tx.ExecContext(ctx, `UPDATE texts SET title=?, content=? WHERE id=?`, t.Title, t.Content, t.ID); err != nil {
+			return 0, fmt.Errorf("update text %s: %w", t.ID, err)
 		}
 	}
-	return tx.Commit()
+	rows, err := tx.QueryContext(ctx, `SELECT id FROM texts WHERE creator_id=?`, userID)
+	if err != nil {
+		return 0, err
+	}
+	var stale []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		if !keep[id] {
+			stale = append(stale, id)
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	for _, id := range stale {
+		res, err := tx.ExecContext(ctx, `DELETE FROM typing_sessions WHERE text_id=?`, id)
+		if err != nil {
+			return 0, err
+		}
+		n, _ := res.RowsAffected()
+		deleted += n
+		if _, err := tx.ExecContext(ctx, `DELETE FROM texts WHERE id=?`, id); err != nil {
+			return 0, err
+		}
+	}
+	return deleted, tx.Commit()
 }

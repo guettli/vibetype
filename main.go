@@ -48,7 +48,7 @@ func run() error {
 	}
 	defer st.Close()
 
-	if err := server.SeedLessons(context.Background(), st); err != nil {
+	if err := server.SeedLessons(context.Background(), st, logger); err != nil {
 		return fmt.Errorf("seed lessons: %w", err)
 	}
 

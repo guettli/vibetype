@@ -16,6 +16,7 @@ import (
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
 
+	"github.com/guettli/vibetype/internal/lessons"
 	"github.com/guettli/vibetype/internal/store"
 )
 
@@ -113,6 +114,11 @@ func (s *Server) registerBegin(w http.ResponseWriter, r *http.Request) {
 	name := strings.Join(strings.Fields(in.DisplayName), " ")
 	if name == "" || utf8.RuneCountInString(name) > maxNameLen {
 		httpError(w, http.StatusBadRequest, fmt.Sprintf("display name must have 1-%d characters", maxNameLen))
+		return
+	}
+	if strings.EqualFold(name, lessons.SystemUserName) {
+		// the built-in lessons are shown as "von vibetype"; nobody may look official
+		httpError(w, http.StatusBadRequest, fmt.Sprintf("the name %q is reserved", name))
 		return
 	}
 	u := &waUser{id: store.NewID(), name: name}

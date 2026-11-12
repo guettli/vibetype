@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { newSession, chars, keyToChar, press, cpm, accuracy, syncPayload } from '../static/engine.js';
+import { newSession, chars, keyToChar, press, cpm, accuracy, syncPayload, MAX_CPM } from '../static/engine.js';
 
 test('keyToChar', () => {
   assert.equal(keyToChar({ key: 'a' }), 'a');
@@ -35,6 +35,14 @@ test('stop on error, finish, stats', () => {
     text_id: 'tid', cursor_pos: 4, error_count: 1, cpm: 4,
     started_at: '2026-01-01T00:00:00.000Z', finished_at: '2026-01-01T00:01:00.000Z',
   });
+});
+
+test('cpm is capped like on the server', () => {
+  const text = chars('x'.repeat(500));
+  const s = newSession('sid', 'tid');
+  const t0 = Date.parse('2026-01-01T00:00:00Z');
+  for (let i = 0; i < 500; i++) press(s, text, 'x', t0 + i); // 500 chars in 0.5 s
+  assert.equal(cpm(s, t0 + 1000), MAX_CPM);
 });
 
 test('chars counts code points', () => {
