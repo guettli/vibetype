@@ -17,6 +17,13 @@ jeder Nutzer kann Texte anlegen, per Link/Code teilen und sieht live, wer seinen
   Großschreibung folgt der 10-Finger-Regel: Shift drückt der kleine Finger der jeweils anderen Hand. Bei QWERTZ werden
   Tottasten in zwei Schritten erklärt: `^` allein ist „^, dann Leertaste“, `é` ist „´, dann e“. Zeichen, die auf dem
   Layout fehlen (z. B. ñ), zeigen „Taste nicht auf diesem Layout“.
+* **Lektionen:** Ein eingebauter Kurs mit 12 Lektionen für die deutsche QWERTZ-Tastatur. Er beginnt mit der
+  Grundreihe (asdf jklö) und führt dann Lektion für Lektion neue Tasten ein: obere und untere Reihe, Großbuchstaben,
+  Zahlen, Satz- und Sonderzeichen. Jede Lektion nutzt nur Tasten, die vorher schon eingeführt wurden. Das prüft
+  [lessons_test.go](internal/lessons/lessons_test.go). Die Lektionen sind normale Texte (IDs `lek01`…`lek12`) eines
+  Systemnutzers „vibetype“, der sich nicht anmelden kann. Der Server legt sie beim Start an bzw. aktualisiert sie.
+  Wird eine Lektion kürzer, werden die Cursor bestehender Sitzungen gekappt. Abgeschlossene Lektionen zeigt die
+  Startseite mit ✓ und der Bestleistung. Nach dem Abschluss führt ein Link zur nächsten Lektion.
 * **Eigene Ergebnisse:** Die Startseite listet die letzten 200 eigenen Tipp-Durchgänge, auch nicht beendete (Datum,
   Text, Fortschritt, Anschläge/min, Fehler, Genauigkeit, Zeit). Die Bestleistung pro Text (beendet, höchste
   Anschläge/min) ist mit ★ markiert. Der Server berechnet sie über alle Durchgänge, nicht nur über die angezeigten.
@@ -110,7 +117,7 @@ verwechselbare Zeichen (kein 0/o, 1/l/i).
   einmal gesetzt. Doppelte oder vertauschte Requests verfälschen den Fortschritt deshalb nicht. `cpm` übernimmt der
   Server nur aus Requests, deren `cursor_pos` nicht kleiner als der gespeicherte Wert ist. `updated_at` ist immer
   Serverzeit.
-* Der Server prüft: Sitzung gehört dem Nutzer und dem Text, `cursor_pos ≤ Textlänge`, `cpm ≤ 3000`, `started_at`
+* Der Server prüft: Sitzung gehört dem Nutzer und dem Text, `cursor_pos ≤ Textlänge`, `cpm` nicht negativ (Werte über 3000 werden auf 3000 gekappt und geloggt, damit der Fortschritt nicht verloren geht), `started_at`
   liegt nicht in der Zukunft, `finished_at` nur am Textende und nach `started_at`, höchstens 50 Sitzungen pro Nutzer
   und Text (sonst 429).
 * Ein 404 beim Sync bedeutet, dass der Text gelöscht wurde. Die App verwirft dann alle lokalen Daten zu diesem Text und
@@ -148,8 +155,9 @@ letzten 60 s.
 | POST | `/api/logout` | |
 | GET | `/api/me` | |
 | GET/POST | `/api/texts` | eigene Texte / neuen Text anlegen |
-| GET | `/api/texts/{id}` | jeder angemeldete Nutzer (Teilen per Link) |
+| GET | `/api/texts/{id}` | jeder angemeldete Nutzer (Teilen per Link); bei Lektionen zusätzlich `next_lesson` |
 | GET | `/api/texts/{id}/sessions` | Live-Ansicht, nur für den Ersteller |
+| GET | `/api/lessons` | eingebaute Lektionen in Kursreihenfolge (`id`, `title`, `length`) |
 | DELETE | `/api/texts/{id}` | nur der Ersteller; löscht auch alle Sitzungen auf dem Text |
-| GET | `/api/me/results[?text_id=…]` | eigene Sitzungen mit Texttitel und -länge, neueste zuerst (max. 200), dazu `best_ids` (Bestleistung pro Text über alle Sitzungen) |
+| GET | `/api/me/results[?text_id=…]` | eigene Sitzungen mit Texttitel und -länge, neueste zuerst (max. 200), dazu `best` (pro Text die beste beendete Sitzung über alle Sitzungen: `id`, `text_id`, `cpm`) |
 | PUT | `/api/sessions/{id}` | Sync |

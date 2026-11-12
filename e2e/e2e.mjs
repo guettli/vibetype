@@ -38,6 +38,25 @@ await A.page.waitForSelector('text=Mit Passkey anmelden');
 await A.page.click('text=Mit Passkey anmelden');
 await A.page.waitForSelector('#user:has-text("Alice")');
 step('Alice logout + passkey login (discoverable)');
+
+// built-in lessons: list, type lesson 1 completely, summary links to lesson 2, home shows ✓
+await A.page.goto(BASE + '/');
+await A.page.waitForSelector('ol.lessons li a');
+const lessonCount = await A.page.$$eval('ol.lessons li', (els) => els.length);
+if (lessonCount !== 12) throw new Error('lessons: ' + lessonCount);
+await A.page.click('ol.lessons li a >> nth=0');
+await A.page.waitForURL(/\/t\/lek01$/);
+await A.page.waitForSelector('.typing');
+const lesson1 = await A.page.evaluate(() => fetch('/api/texts/lek01').then((r) => r.json()).then((t) => t.content));
+// keyboard.type() sends no keydown for non-US characters like ö, so dispatch keydown events like a German keyboard would
+await A.page.evaluate((text) => {
+  for (const ch of text) document.dispatchEvent(new KeyboardEvent('keydown', { key: ch === '\n' ? 'Enter' : ch, bubbles: true, cancelable: true }));
+}, lesson1);
+await A.page.waitForSelector('a.next-lesson[href="/t/lek02"]');
+await A.page.waitForSelector('.summary:has-text("Dein erstes Ergebnis")');
+step(`lesson 1 typed (${lesson1.length} chars): ` + (await A.page.textContent('.summary')).replace(/\s+/g, ' '));
+await A.page.click('a.logo');
+await A.page.waitForSelector('ol.lessons li.done');
 await A.page.goto(`${BASE}/t/${slug}`);
 
 const B = await newUser('Bob'); step('Bob registered');

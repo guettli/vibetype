@@ -121,10 +121,17 @@ function enqueue(state) {
   us.set('pending', pending);
 }
 
-let syncing = false;
-async function flush() {
-  if (syncing || !me) return;
-  syncing = true;
+// flush sends all pending states. Calls are serialized: a call made while a sync
+// is running waits for it and then syncs again, so `await flush()` guarantees that
+// everything queued before the call has been sent (or failed).
+let flushQueue = Promise.resolve();
+function flush() {
+  flushQueue = flushQueue.then(flushOnce, flushOnce);
+  return flushQueue;
+}
+
+async function flushOnce() {
+  if (!me) return;
   try {
     const pending = us.get('pending', {});
     for (const [id, payload] of Object.entries(pending)) {
@@ -154,7 +161,6 @@ async function flush() {
       }
     }
   } finally {
-    syncing = false;
     renderStatus();
   }
 }
@@ -369,6 +375,10 @@ async function homeView() {
   const code = h('input', { type: 'text', placeholder: 'Code, z. B. a7x9k2', pattern: '[a-z0-9]+', required: true, autocapitalize: 'off' });
   const list = h('ul', { class: 'texts' }, h('li', { class: 'muted' }, 'lade …'));
   const results = h('div', {}, h('p', { class: 'muted' }, 'lade …'));
+  const lessonList = h('ol', { class: 'lessons' }, h('li', { class: 'muted' }, 'lade …'));
+  // shared by the lessons list and the results table; sync first so a run finished seconds ago is included
+  const resultsReq = flush().then(() => api('GET', '/api/me/results'));
+  resultsReq.catch(() => {}); // handled by each consumer
 
   fill($app, 
     h('section', { class: 'card' },
@@ -389,10 +399,15 @@ async function homeView() {
         },
       }, title, content, h('button', { class: 'primary' }, 'Speichern & teilen')),
     ),
+    h('section', { class: 'card' },
+      h('h2', {}, 'Lektionen'),
+      h('p', { class: 'muted' }, 'Ein Kurs für die deutsche QWERTZ-Tastatur: jede Lektion führt ein paar neue Tasten ein und nutzt nur Tasten, die du schon kennst.'),
+      lessonList),
     h('section', { class: 'card' }, h('h2', {}, 'Meine Texte'), list),
     h('section', { class: 'card' }, h('h2', {}, 'Meine Ergebnisse'), results),
   );
-  loadResults(results);
+  loadResults(results, resultsReq);
+  loadLessons(lessonList, resultsReq);
 
   try {
     const texts = await api('GET', '/api/texts');
@@ -437,16 +452,30 @@ function bestOf(runs) {
   return best;
 }
 
-async function loadResults($el) {
+async function loadLessons($el, resultsReq) {
+  let lessons;
+  try { lessons = await api('GET', '/api/lessons'); }
+  catch (err) {
+    fill($el, h('li', { class: isOffline(err) ? 'warn' : 'bad' }, isOffline(err) ? 'offline – Lektionen nicht verfügbar' : err.message));
+    return;
+  }
+  const best = {};
+  try { for (const b of (await resultsReq).best) best[b.text_id] = b; } catch { /* shown by the results table */ }
+  fill($el, lessons.map((l) => h('li', { class: best[l.id] ? 'done' : '' },
+    h('a', { href: '/t/' + l.id, 'data-link': true }, l.title),
+    best[l.id] ? h('span', { class: 'muted' }, ` ✓ ${best[l.id].cpm} Anschläge/min`) : null)));
+}
+
+async function loadResults($el, resultsReq) {
   let data;
-  try { data = await api('GET', '/api/me/results'); }
+  try { data = await resultsReq; }
   catch (err) {
     fill($el, h('p', { class: isOffline(err) ? 'warn' : 'bad' }, isOffline(err) ? 'offline – Ergebnisse nicht verfügbar' : err.message));
     return;
   }
   const { results, limit } = data;
   if (!results.length) { fill($el, h('p', { class: 'muted' }, 'Noch keine Ergebnisse. Öffne einen Text und tippe los.')); return; }
-  const best = new Set(data.best_ids); // computed over all runs, not only the listed ones
+  const best = new Set(data.best.map((b) => b.id)); // computed over all runs, not only the listed ones
   fill($el, results.length >= limit ? h('p', { class: 'muted' }, `Die letzten ${limit} Durchgänge:`) : null, h('table', { class: 'results' },
     h('thead', {}, h('tr', {}, h('th', {}, 'Datum'), h('th', {}, 'Text'), h('th', {}, 'Fortschritt'), h('th', { class: 'num' }, 'Anschl./min'),
       h('th', { class: 'num' }, 'Fehler'), h('th', { class: 'num' }, 'Genauigkeit'), h('th', { class: 'num' }, 'Zeit'))),
@@ -547,6 +576,7 @@ async function typingView(textId) {
       h('h3', {}, 'Fertig!'),
       h('p', {}, `${myCpm} Anschläge/min · ${accuracy(state)} % Genauigkeit · ${state.errors} Fehler · Zeit ${fmtDuration(Date.parse(state.finishedAt) - Date.parse(state.startedAt))}`),
       verdict,
+      text.next_lesson ? h('p', {}, h('a', { href: '/t/' + text.next_lesson, 'data-link': true, class: 'next-lesson' }, 'Nächste Lektion →')) : null,
     ].filter(Boolean));
   }
   function restart() {

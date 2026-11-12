@@ -472,24 +472,69 @@ func (s *Store) DeleteText(ctx context.Context, textID, userID string) error {
 	return tx.Commit()
 }
 
-// BestResultIDs returns, per text, the id of the user's finished session with
-// the highest cpm (ties: the earlier one). Not limited, unlike ResultsForUser.
-func (s *Store) BestResultIDs(ctx context.Context, userID string) ([]string, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id FROM (
-			SELECT id, ROW_NUMBER() OVER (PARTITION BY text_id ORDER BY cpm DESC, finished_at ASC) AS rn
+// Best is the user's best finished session on one text.
+type Best struct {
+	ID     string `json:"id"`
+	TextID string `json:"text_id"`
+	CPM    int    `json:"cpm"`
+}
+
+// BestResults returns, per text, the user's finished session with the highest
+// cpm (ties: the earlier one). Not limited, unlike ResultsForUser.
+func (s *Store) BestResults(ctx context.Context, userID string) ([]Best, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, text_id, cpm FROM (
+			SELECT id, text_id, cpm, ROW_NUMBER() OVER (PARTITION BY text_id ORDER BY cpm DESC, finished_at ASC) AS rn
 			FROM typing_sessions WHERE user_id=? AND finished_at IS NOT NULL)
 		WHERE rn=1`, userID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	out := []string{}
+	out := []Best{}
 	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
+		var b Best
+		if err := rows.Scan(&b.ID, &b.TextID, &b.CPM); err != nil {
 			return nil, err
 		}
-		out = append(out, id)
+		out = append(out, b)
 	}
 	return out, rows.Err()
+}
+
+// SeedText is a built-in text (e.g. a lesson) owned by a system user.
+type SeedText struct{ ID, Title, Content string }
+
+// SeedTexts creates the system user and creates or updates the given texts
+// under fixed ids. If a text got shorter, cursors of existing sessions are
+// clamped so they stay valid. Idempotent; run at startup.
+func (s *Store) SeedTexts(ctx context.Context, userID, userName string, texts []SeedText) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	now := s.now()
+	if _, err := tx.ExecContext(ctx, `INSERT INTO users(id, display_name, created_at) VALUES(?,?,?)
+		ON CONFLICT(id) DO UPDATE SET display_name=excluded.display_name`, userID, userName, now); err != nil {
+		return fmt.Errorf("seed user: %w", err)
+	}
+	for _, t := range texts {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO texts(id, creator_id, title, content, created_at) VALUES(?,?,?,?,?)
+			ON CONFLICT(id) DO UPDATE SET title=excluded.title, content=excluded.content
+			WHERE creator_id=excluded.creator_id`, t.ID, userID, t.Title, t.Content, now); err != nil {
+			return fmt.Errorf("seed text %s: %w", t.ID, err)
+		}
+		var creator string
+		if err := tx.QueryRowContext(ctx, `SELECT creator_id FROM texts WHERE id=?`, t.ID).Scan(&creator); err != nil {
+			return err
+		}
+		if creator != userID {
+			return fmt.Errorf("seed text %s: id is taken by a text of user %s", t.ID, creator)
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE typing_sessions SET cursor_pos=length(?) WHERE text_id=? AND cursor_pos > length(?)`,
+			t.Content, t.ID, t.Content); err != nil {
+			return fmt.Errorf("clamp sessions of %s: %w", t.ID, err)
+		}
+	}
+	return tx.Commit()
 }
