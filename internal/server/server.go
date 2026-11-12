@@ -134,6 +134,7 @@ func (s *Server) routes() {
 	m.HandleFunc("GET /api/me/results", s.auth(s.myResults))
 	m.HandleFunc("GET /api/lessons", s.auth(s.listLessons))
 	m.HandleFunc("GET /api/me/weak-keys", s.auth(s.weakKeys))
+	m.HandleFunc("GET /api/me/progress", s.auth(s.myProgress))
 	m.HandleFunc("POST /api/me/practice", s.auth(s.createPractice))
 	m.HandleFunc("PUT /api/sessions/{id}", s.auth(s.syncSession))
 
@@ -461,6 +462,29 @@ func (s *Server) myResults(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"results": results, "best": best, "limit": maxResults})
+}
+
+const (
+	progressWindow = 90 * 24 * time.Hour
+	progressLimit  = 5000
+)
+
+// myProgress returns the caller's sessions of the last 90 days for the progress
+// chart. The client groups them by local day (the server does not know the
+// user's time zone). truncated tells the client that older sessions inside the
+// window were cut off by the limit.
+func (s *Server) myProgress(w http.ResponseWriter, r *http.Request) {
+	runs, err := s.cfg.Store.ActivitySince(r.Context(), userFrom(r.Context()).ID, s.now().Add(-progressWindow), progressLimit+1)
+	if err != nil {
+		s.internal(w, r, err)
+		return
+	}
+	truncated := len(runs) > progressLimit
+	if truncated {
+		runs = runs[:progressLimit]
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"runs": runs, "days": int(progressWindow.Hours() / 24),
+		"limit": progressLimit, "truncated": truncated})
 }
 
 // listLessons returns the built-in lessons in course order (without content).

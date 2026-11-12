@@ -170,7 +170,7 @@ func TestTextsAndSync(t *testing.T) {
 
 func TestStaticAndSPA(t *testing.T) {
 	e := newEnv(t)
-	for _, p := range []string{"/", "/t/abc123", "/konto", "/static/app.js", "/static/engine.js", "/static/keyboard.js", "/static/style.css", "/sw.js", "/healthz"} {
+	for _, p := range []string{"/", "/t/abc123", "/konto", "/static/app.js", "/static/engine.js", "/static/keyboard.js", "/static/progress.js", "/static/style.css", "/sw.js", "/healthz"} {
 		if c := e.do("", "GET", p, nil, nil); c != 200 {
 			t.Errorf("GET %s: %d", p, c)
 		}
@@ -610,5 +610,57 @@ func TestActiveMS(t *testing.T) {
 		if (r.ID == "session-new") != (r.ActiveMS != nil) {
 			t.Fatalf("active_ms not returned correctly: %+v", r)
 		}
+	}
+}
+
+func TestProgress(t *testing.T) {
+	e := newEnv(t)
+	_, tok := e.login("Paula")
+	_, other := e.login("Otto")
+	var txt store.Text
+	if c := e.do(tok, "POST", "/api/texts", map[string]string{"title": "t", "content": "abc def"}, &txt); c != 201 {
+		t.Fatalf("create: %d", c)
+	}
+	start := time.Now().Add(-time.Minute)
+	fin := time.Now()
+	sync := func(tok, id string, cursor int, finished *time.Time) {
+		t.Helper()
+		body := map[string]any{"text_id": txt.ID, "cursor_pos": cursor, "error_count": 1, "cpm": 120, "started_at": start,
+			"finished_at": finished, "active_ms": 30000}
+		if c := e.do(tok, "PUT", "/api/sessions/"+id, body, nil); c != 200 {
+			t.Fatalf("sync %s: %d", id, c)
+		}
+	}
+	sync(tok, "progress-finished", 7, &fin)
+	sync(tok, "progress-running", 3, nil)
+	sync(tok, "progress-untouched", 0, nil) // opened but nothing typed: not practice
+	sync(other, "progress-other", 7, &fin)  // someone else's run
+
+	type resp struct {
+		Runs      []store.Activity `json:"runs"`
+		Days      int              `json:"days"`
+		Limit     int              `json:"limit"`
+		Truncated bool             `json:"truncated"`
+	}
+	var p resp
+	if c := e.do(tok, "GET", "/api/me/progress", nil, &p); c != 200 {
+		t.Fatalf("progress: %d", c)
+	}
+	if p.Days != 90 || p.Limit != progressLimit || p.Truncated || len(p.Runs) != 2 {
+		t.Fatalf("progress: %+v", p)
+	}
+	if r := p.Runs[1]; r.FinishedAt == nil || r.CursorPos != 7 || r.ErrorCount != 1 || r.CPM != 120 || r.ActiveMS == nil || *r.ActiveMS != 30000 {
+		t.Fatalf("finished run: %+v", r)
+	}
+	if r := p.Runs[0]; r.FinishedAt != nil || r.CursorPos != 3 {
+		t.Fatalf("running run (newest first): %+v", r)
+	}
+	// 91 days later both runs are outside the window
+	e.srv.now = func() time.Time { return time.Now().Add(91 * 24 * time.Hour) }
+	if c := e.do(tok, "GET", "/api/me/progress", nil, &p); c != 200 || len(p.Runs) != 0 {
+		t.Fatalf("progress after 91 days: %d %+v", c, p)
+	}
+	if c := e.do("", "GET", "/api/me/progress", nil, nil); c != 401 {
+		t.Fatalf("progress without login: %d", c)
 	}
 }

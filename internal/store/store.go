@@ -528,6 +528,41 @@ func (s *Store) ResultsForUser(ctx context.Context, userID, textID string, limit
 	return out, rows.Err()
 }
 
+// Activity is one typing session reduced to what the progress chart needs.
+type Activity struct {
+	UpdatedAt  time.Time  `json:"updated_at"`
+	FinishedAt *time.Time `json:"finished_at"`
+	CursorPos  int        `json:"cursor_pos"`
+	ErrorCount int        `json:"error_count"`
+	CPM        int        `json:"cpm"`
+	ActiveMS   *int64     `json:"active_ms"`
+}
+
+// ActivitySince lists a user's sessions with at least one typed character and
+// a sync at or after since, newest first, at most limit.
+func (s *Store) ActivitySince(ctx context.Context, userID string, since time.Time, limit int) ([]Activity, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT updated_at, finished_at, cursor_pos, error_count, cpm, active_ms
+		FROM typing_sessions WHERE user_id=? AND cursor_pos > 0 AND updated_at >= ?
+		ORDER BY updated_at DESC LIMIT ?`, userID, since, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Activity{}
+	for rows.Next() {
+		var a Activity
+		var fin sql.NullTime
+		if err := rows.Scan(&a.UpdatedAt, &fin, &a.CursorPos, &a.ErrorCount, &a.CPM, &a.ActiveMS); err != nil {
+			return nil, err
+		}
+		if fin.Valid {
+			a.FinishedAt = &fin.Time
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
 // DeleteText deletes a text and all typing sessions on it. Only the creator may
 // delete: ErrNotFound if the text does not exist, ErrForbidden if it is someone else's.
 func (s *Store) DeleteText(ctx context.Context, textID, userID string) error {

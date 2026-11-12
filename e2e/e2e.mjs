@@ -89,6 +89,26 @@ await A.page.waitForSelector('table.weak .keycap');
 const weakFirst = await A.page.$eval('table.weak tr', (el) => el.innerText.replace(/\s+/g, ' '));
 if (!weakFirst.startsWith('ö 50 %')) throw new Error('weak keys: ' + weakFirst);
 step('weak key: ' + weakFirst);
+
+// progress: today counts for the streak; a run finished two days ago (synced
+// late, e.g. after offline typing) adds a second day, so the charts appear
+const streakText = await A.page.textContent('p.streak');
+if (!streakText.includes('1 Tag in Folge geübt, heute schon dabei. 1 Übungstag in')) throw new Error('streak: ' + streakText);
+await A.page.evaluate(async (len) => {
+  const fin = new Date(Date.now() - 2 * 86400000);
+  const res = await fetch('/api/sessions/' + crypto.randomUUID(), {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text_id: 'lek01', cursor_pos: len, error_count: 0, cpm: 90, active_ms: 60000,
+      started_at: new Date(fin - 120000).toISOString(), finished_at: fin.toISOString() }),
+  });
+  if (!res.ok) throw new Error('sync: ' + res.status);
+}, lesson1.length);
+await A.page.reload();
+await A.page.waitForSelector('figure.chart');
+const charts = await A.page.$$eval('figure.chart', (fs) => fs.map((f) => f.querySelectorAll('circle').length));
+if (charts.join() !== '2,2') throw new Error('charts: ' + charts);
+if (process.env.SHOT_DIR) await A.page.locator('section:has(h2:text("Fortschritt"))').screenshot({ path: process.env.SHOT_DIR + '/progress.png' });
+step('progress: ' + streakText + ', charts with 2 days');
 await A.page.click('text=Übungstext für diese Tasten erstellen');
 await A.page.waitForSelector('h2:has-text("Übung: ö")');
 const practiceText = await A.page.textContent('.typing');

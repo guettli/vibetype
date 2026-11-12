@@ -143,3 +143,38 @@ func TestMigrateAddsKeyErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestActivitySinceLimit(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(filepath.Join(t.TempDir(), "a.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	u := User{ID: NewID(), DisplayName: "u"}
+	if err := s.CreateUserWithPasskey(ctx, u, Passkey{ID: NewID(), PublicKey: []byte{1}, Credential: []byte("{}")}); err != nil {
+		t.Fatal(err)
+	}
+	txt, err := s.CreateText(ctx, u.ID, "t", "abc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+	for i := range 3 {
+		s.now = func() time.Time { return base.Add(time.Duration(i) * time.Hour) }
+		ts := TypingSession{ID: NewID(), TextID: txt.ID, UserID: u.ID, CursorPos: i + 1, CPM: 100, StartedAt: base}
+		if _, err := s.UpsertTypingSession(ctx, ts, 50); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := s.ActivitySince(ctx, u.ID, base.Add(30*time.Minute), 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].CursorPos != 3 || got[1].CursorPos != 2 {
+		t.Fatalf("since filter / order: %+v", got)
+	}
+	if got, err = s.ActivitySince(ctx, u.ID, base, 1); err != nil || len(got) != 1 || got[0].CursorPos != 3 {
+		t.Fatalf("limit: %+v %v", got, err)
+	}
+}

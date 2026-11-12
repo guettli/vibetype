@@ -65,6 +65,16 @@ jeder Nutzer kann Texte anlegen, per Link/Code teilen und sieht live, wer seinen
   Nach dem Abschluss eines Texts zeigt eine Zusammenfassung das Ergebnis und vergleicht es mit der bisherigen
   Bestleistung. Dafür zählen die Durchgänge auf dem Server und die lokale Historie dieses Browsers, also auch noch
   nicht synchronisierte oder offline beendete Durchgänge.
+* **Fortschritt:** Die Startseite zeigt, an wie vielen Tagen in Folge man geübt hat. Jeder Tag zählt, an dem
+  mindestens ein Zeichen getippt wurde, auch ohne den Text zu beenden. Maßgeblich ist der Tag des letzten Syncs. Wer
+  heute noch nicht geübt hat, verliert die Serie erst um Mitternacht; die App erinnert dann daran. Dazu kommen zwei
+  Kurven über die letzten 90 Tage: Anschläge/min (Median der beendeten Durchgänge pro Tag) und Genauigkeit (über alle
+  Anschläge des Tages). In die Kurven gehen nur Durchgänge mit gemessener Tippzeit ohne Pausen ein, ältere würden
+  springen. Die x-Achse beginnt am ersten Tag mit Daten und zeigt mindestens eine Woche. Die Kurve erscheint ab zwei
+  Tagen mit beendeten Texten. Die Tage sind Kalendertage in der Zeitzone des Browsers: Der Server liefert die rohen
+  Durchgänge (`GET /api/me/progress`, höchstens 5000, eine Kürzung wird angezeigt), der Browser gruppiert sie. Das
+  Diagramm ist ein Inline-SVG ohne Bibliothek. Gelöschte Texte und vom 50-Durchgänge-Limit entfernte Durchgänge fehlen
+  auch hier.
 * **Texte löschen:** Der Ersteller kann einen Text löschen. Dabei werden auch alle Tipp-Sitzungen aller Personen auf
   diesem Text gelöscht (mit Rückfrage). Wer den Text noch offline im Browser hat, bekommt beim nächsten Sync den
   Hinweis, dass der Text gelöscht wurde. Seine lokalen Daten zu diesem Text werden dann verworfen.
@@ -114,7 +124,7 @@ Docker: `docker build -t vibetype . && docker run -p 8080:8080 -v vibetype:/data
 
 ```sh
 go test ./...                       # Normalisierung, API, Sync-Semantik, Rechte, CSRF, Limits, Nebenläufigkeit
-node --test web/test/*.test.mjs     # Tipp-Engine (Stop-on-Error, CPM, Genauigkeit), Tastatur-Layouts/Finger
+node --test web/test/*.test.mjs     # Tipp-Engine (Stop-on-Error, CPM, Genauigkeit), Tastatur-Layouts/Finger, Fortschritt (Tage, Serie, Achsen)
 # E2E (Chromium mit virtuellem Passkey-Authenticator):
 go run . -addr :8099 -origin http://localhost:8099 -db /tmp/e2e.db &
 (cd e2e && npm install && npx playwright install chromium && node e2e.mjs)
@@ -208,6 +218,7 @@ letzten 60 s.
 | GET | `/api/texts/{id}` | jeder angemeldete Nutzer (Teilen per Link); bei Lektionen zusätzlich `next_lesson` |
 | GET | `/api/texts/{id}/sessions` | Live-Ansicht, nur für den Ersteller |
 | GET | `/api/lessons` | eingebaute Lektionen in Kursreihenfolge (`id`, `title`, `length`) |
+| GET | `/api/me/progress` | Sitzungen mit mindestens einem getippten Zeichen und Sync in den letzten 90 Tagen, neueste zuerst: `runs` (`updated_at`, `finished_at`, `cursor_pos`, `error_count`, `cpm`, `active_ms`), `days`, `limit`, `truncated` |
 | GET | `/api/me/weak-keys` | Problemtasten: `keys` (`char`, `errors`, `attempts`, `rate`), `days`, `min_attempts` |
 | POST | `/api/me/practice` | erstellt einen Übungstext für die Problemtasten (201) oder 409, solange es keine gibt |
 | GET | `/api/texts/{id}/qr.svg` | QR-Code des Teilen-Links (`<origin>/t/{id}`) als SVG |
