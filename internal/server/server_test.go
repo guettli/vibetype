@@ -435,6 +435,35 @@ func TestWeakKeysAndPractice(t *testing.T) {
 	if c := e.do(tok, "POST", "/api/me/practice", nil, &p); c != 201 || p.Title != "Übung: ö" || !strings.Contains(p.Content, "ö") {
 		t.Fatalf("practice: %d %+v", c, p)
 	}
+	// a huge count cannot overflow the sum check
+	if c := put(map[string]int{"ö": 9223372036854775807, "a": 1}, 6); c != 400 {
+		t.Fatalf("overflowing key_errors: %d", c)
+	}
+	// repeated practice clicks keep only the newest 3 practice texts; user texts are untouched
+	for range 3 {
+		if c := e.do(tok, "POST", "/api/me/practice", nil, nil); c != 201 {
+			t.Fatalf("practice: %d", c)
+		}
+	}
+	var mine []store.Text
+	e.do(tok, "GET", "/api/texts", nil, &mine)
+	practices := 0
+	for _, m := range mine {
+		if strings.HasPrefix(m.Title, "Übung: ") {
+			practices++
+		}
+	}
+	if practices != 3 || len(mine) != 4 {
+		t.Fatalf("after 4 practice clicks: %d practice texts, %d texts", practices, len(mine))
+	}
+	// a session with errors but without key_errors (old client) must not dilute the rate
+	if c := e.do(tok, "PUT", "/api/sessions/session-no-keys", map[string]any{"text_id": txt.ID, "cursor_pos": n, "error_count": 3,
+		"cpm": 10, "started_at": start}, nil); c != 200 {
+		t.Fatalf("old-style sync: %d", c)
+	}
+	if e.do(tok, "GET", "/api/me/weak-keys", nil, &wk); len(wk.Keys) != 1 || wk.Keys[0].Attempts != 15 {
+		t.Fatalf("weak keys diluted by a session without key data: %+v", wk.Keys)
+	}
 	// an older client without key_errors still syncs
 	if c := e.do(tok, "PUT", "/api/sessions/session-old-client", map[string]any{"text_id": txt.ID, "cursor_pos": 1, "error_count": 0,
 		"cpm": 10, "started_at": start}, nil); c != 200 {

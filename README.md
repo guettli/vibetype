@@ -32,7 +32,11 @@ jeder Nutzer kann Texte anlegen, per Link/Code teilen und sieht live, wer seinen
   Versuche = korrekt getippte Vorkommen + Fehler). Bewertet wird ein Zeichen erst ab 10 Versuchen. Dazu kommt der
   Fingerhinweis für das gewählte Layout. „Übungstext für diese Tasten erstellen“ legt einen eigenen Text an: Pro
   Problemtaste gibt es zwei Zeilen mit Wörtern aus den Lektionen, die das Zeichen enthalten (ohne die Fingerübungs-Zeilen
-  der Lektionen). Für Zeichen ohne passendes Wort, etwa Ziffern oder Sonderzeichen, gibt es ein Drill-Muster.
+  der Lektionen). Bei weniger als drei passenden Wörtern, etwa für Ziffern oder Sonderzeichen, kommen Drill-Gruppen
+  dazu. Für die Leertaste gibt es Zeilen mit kurzen Wörtern, für Enter viele kurze Zeilen. Von den erzeugten
+  Übungstexten bleiben pro Nutzer die neuesten 3 erhalten, ältere werden samt Sitzungen gelöscht. Sitzungen mit Fehlern,
+  aber ohne Aufschlüsselung pro Zeichen (vor dieser Funktion oder von alten Clients), zählen nicht zur Quote, sonst
+  würden sie die Quote verwässern.
 * **Eigene Ergebnisse:** Die Startseite listet die letzten 200 eigenen Tipp-Durchgänge, auch nicht beendete (Datum,
   Text, Fortschritt, Anschläge/min, Fehler, Genauigkeit, Zeit). Die Bestleistung pro Text (beendet, höchste
   Anschläge/min) ist mit ★ markiert. Der Server berechnet sie über alle Durchgänge, nicht nur über die angezeigten.
@@ -104,6 +108,8 @@ go run . -addr :8099 -origin http://localhost:8099 -db /tmp/e2e.db &
   Attestation). go-webauthn prüft beim Login die Backup-Flags, `public_key` und `sign_count` allein reichen dafür nicht.
 * `typing_sessions.key_errors` (JSON) zählt die Fehler pro Zeichen. Ältere Datenbanken bekommen die Spalte beim Start
   per `ALTER TABLE` nachgerüstet.
+* `texts.kind` ist `''` für selbst geschriebene Texte und `practice` für erzeugte Übungstexte (nachgerüstet wie
+  `key_errors`).
 * `auth_sessions` enthält die Login-Sitzungen. Gespeichert wird nur der SHA-256 des Cookie-Tokens.
 
 ### Texte
@@ -119,7 +125,7 @@ verwechselbare Zeichen (kein 0/o, 1/l/i).
 
 `PUT /api/sessions/{client-uuid}` mit `{text_id, cursor_pos, error_count, cpm, started_at, finished_at, key_errors}`.
 `key_errors` ist optional (ältere Clients senden es nicht). Jeder Schlüssel muss genau ein Zeichen sein, das im Text
-vorkommt, jeder Wert muss positiv sein, und die Summe darf `error_count` nicht übersteigen.
+vorkommt, jeder Wert muss zwischen 1 und `error_count` liegen, und die Summe darf `error_count` nicht übersteigen.
 
 * Die Queue (`pending` in `localStorage`) hält pro Sitzung nur den letzten Stand (latest wins). Sie bleibt auch
   nach langer Offline-Phase klein.

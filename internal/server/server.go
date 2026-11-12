@@ -483,8 +483,8 @@ func validKeyErrors(ke map[string]int, content string, errorCount int) string {
 		if utf8.RuneCountInString(k) != 1 || !strings.Contains(content, k) {
 			return fmt.Sprintf("%q is not a character of the text", k)
 		}
-		if n < 1 {
-			return fmt.Sprintf("count for %q must be positive", k)
+		if n < 1 || n > errorCount { // the upper bound also keeps the sum from overflowing
+			return fmt.Sprintf("count for %q must be between 1 and error_count", k)
 		}
 		sum += n
 	}
@@ -499,6 +499,7 @@ const (
 	weakKeysSessions    = 200
 	weakKeysMinAttempts = 10
 	weakKeysLimit       = 5
+	keepPracticeTexts   = 3 // older generated practice texts of a user are deleted
 )
 
 func (s *Server) loadWeakKeys(r *http.Request) ([]store.KeyStat, error) {
@@ -542,7 +543,7 @@ func (s *Server) createPractice(w http.ResponseWriter, r *http.Request) {
 		shown = append(shown, c)
 	}
 	u := userFrom(r.Context())
-	t, err := s.cfg.Store.CreateText(r.Context(), u.ID, "Übung: "+strings.Join(shown, " "), content)
+	t, err := s.cfg.Store.CreatePracticeText(r.Context(), u.ID, "Übung: "+strings.Join(shown, " "), content, keepPracticeTexts)
 	if err != nil {
 		s.internal(w, r, err)
 		return
