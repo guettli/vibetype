@@ -42,7 +42,7 @@ step('Alice logout + passkey login (discoverable)');
 
 // account: rename, add a passkey on a "second device", log in with it, delete the first one
 await A.page.click('#user a');
-await A.page.waitForSelector('ul.passkeys li:has-text("Passkey 1")');
+await A.page.waitForSelector('ul.passkeys li:has-text("Passkey vom")');
 await A.page.fill('input[aria-label="Anzeigename"]', 'Alice B.');
 await A.page.click('text=Speichern');
 await A.page.waitForSelector('#user a:text("Alice B.")');
@@ -56,8 +56,8 @@ await A.page.click('text=Mit Passkey anmelden');
 await A.page.waitForSelector('#user:has-text("Alice B.")');
 await A.page.click('#user a');
 A.page.once('dialog', (d) => d.accept());
-await A.page.click('ul.passkeys li:has-text("Passkey 1") >> text=löschen');
-await A.page.waitForSelector('ul.passkeys li:has-text("Passkey 1")', { state: 'detached' });
+await A.page.click('ul.passkeys li:has-text("Passkey vom") >> text=löschen');
+await A.page.waitForSelector('ul.passkeys li:has-text("Passkey vom")', { state: 'detached' });
 if (await A.page.$('ul.passkeys button')) throw new Error('the last passkey must not be deletable');
 step('account: renamed, second passkey added and used to log in, first one deleted');
 

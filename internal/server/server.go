@@ -58,6 +58,8 @@ type Server struct {
 	mux    *http.ServeMux
 	secure bool
 
+	now func() time.Time // replaceable in tests
+
 	mu         sync.Mutex
 	ceremonies map[string]ceremony // key: random id in ceremonyCookie
 }
@@ -86,6 +88,7 @@ func New(cfg Config) (*Server, error) {
 		mux:        http.NewServeMux(),
 		secure:     strings.HasPrefix(cfg.Origin, "https://"),
 		ceremonies: map[string]ceremony{},
+		now:        time.Now,
 	}
 	s.routes()
 	return s, nil

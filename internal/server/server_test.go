@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -21,9 +22,10 @@ import (
 )
 
 type env struct {
-	t  *testing.T
-	ts *httptest.Server
-	st *store.Store
+	srv *Server
+	t   *testing.T
+	ts  *httptest.Server
+	st  *store.Store
 }
 
 func newEnv(t *testing.T) *env {
@@ -40,7 +42,7 @@ func newEnv(t *testing.T) *env {
 	}
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
-	return &env{t: t, ts: ts, st: st}
+	return &env{srv: srv, t: t, ts: ts, st: st}
 }
 
 // login creates a user (bypassing WebAuthn) and returns its session token.
@@ -533,5 +535,41 @@ func TestAccount(t *testing.T) {
 	// the add ceremony cannot be used to sign up a new account
 	if c := e.do("", "POST", "/api/register/finish", map[string]string{}, nil); c != 400 {
 		t.Fatalf("finish without ceremony: %d", c)
+	}
+}
+
+func TestPasskeyChangesNeedRecentLogin(t *testing.T) {
+	e := newEnv(t)
+	u, tok := e.login("Rita")
+	if err := e.st.AddPasskey(context.Background(), store.Passkey{ID: "second", UserID: u.ID, PublicKey: []byte{1}, Credential: []byte("{}")}, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.st.AddPasskey(context.Background(), store.Passkey{ID: "second", UserID: u.ID, PublicKey: []byte{1}, Credential: []byte("{}")}, ""); !errors.Is(err, store.ErrDuplicate) {
+		t.Fatalf("duplicate credential: %v", err)
+	}
+	otherTok, err := e.st.CreateAuthSession(context.Background(), u.ID, time.Hour) // e.g. a stolen or forgotten session
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.srv.now = func() time.Time { return time.Now().Add(reauthWindow + time.Minute) }
+	var resp struct{ Error, Code string }
+	if c := e.do(tok, "DELETE", "/api/me/passkeys/second", nil, &resp); c != 403 || resp.Code != "reauth_required" {
+		t.Fatalf("stale login delete: %d %+v", c, resp)
+	}
+	if c := e.do(tok, "POST", "/api/me/passkeys/begin", map[string]string{"label": "x"}, &resp); c != 403 || resp.Code != "reauth_required" {
+		t.Fatalf("stale login add: %d %+v", c, resp)
+	}
+	if c := e.do(tok, "PUT", "/api/me", map[string]string{"display_name": "Rita R."}, nil); c != 200 {
+		t.Fatalf("rename needs no fresh login: %d", c)
+	}
+	e.srv.now = time.Now
+	if c := e.do(tok, "DELETE", "/api/me/passkeys/second", nil, nil); c != 204 {
+		t.Fatalf("fresh login delete: %d", c)
+	}
+	if c := e.do(otherTok, "GET", "/api/me", nil, nil); c != 401 {
+		t.Fatalf("other sessions must end when a passkey is deleted: %d", c)
+	}
+	if c := e.do(tok, "GET", "/api/me", nil, nil); c != 200 {
+		t.Fatalf("own session must survive: %d", c)
 	}
 }

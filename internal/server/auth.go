@@ -329,6 +329,19 @@ func (s *Server) listPasskeys(w http.ResponseWriter, r *http.Request) {
 
 const maxLabelLen = 40
 
+// reauthWindow: adding or deleting a passkey needs a login this recent, so a
+// stolen session cookie cannot be turned into a passkey the attacker keeps.
+const reauthWindow = 10 * time.Minute
+
+// recentLogin answers 403 {code: "reauth_required"} unless the current login is fresh.
+func (s *Server) recentLogin(w http.ResponseWriter, r *http.Request) bool {
+	if s.now().Sub(userFrom(r.Context()).LoggedInAt) <= reauthWindow {
+		return true
+	}
+	writeJSON(w, http.StatusForbidden, map[string]string{"error": "please sign in again with your passkey to change your passkeys", "code": "reauth_required"})
+	return false
+}
+
 // addPasskeyBegin starts registering another passkey (e.g. the phone or the
 // home PC) for the logged-in user. Existing credentials are excluded so the
 // same authenticator is not registered twice.
@@ -336,7 +349,7 @@ func (s *Server) addPasskeyBegin(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Label string `json:"label"`
 	}
-	if !readJSON(w, r, &in) {
+	if !readJSON(w, r, &in) || !s.recentLogin(w, r) {
 		return
 	}
 	label := strings.Join(strings.Fields(in.Label), " ")
@@ -386,7 +399,10 @@ func (s *Server) addPasskeyFinish(w http.ResponseWriter, r *http.Request) {
 		s.internal(w, r, err)
 		return
 	}
-	if err := s.cfg.Store.AddPasskey(r.Context(), pk, c.label); err != nil {
+	if err := s.cfg.Store.AddPasskey(r.Context(), pk, c.label); errors.Is(err, store.ErrDuplicate) {
+		httpError(w, http.StatusConflict, "this passkey is already registered")
+		return
+	} else if err != nil {
 		s.internal(w, r, err)
 		return
 	}
@@ -394,7 +410,19 @@ func (s *Server) addPasskeyFinish(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) deletePasskey(w http.ResponseWriter, r *http.Request) {
-	err := s.cfg.Store.DeletePasskey(r.Context(), userFrom(r.Context()).ID, r.PathValue("id"))
+	if !s.recentLogin(w, r) {
+		return
+	}
+	uid := userFrom(r.Context()).ID
+	err := s.cfg.Store.DeletePasskey(r.Context(), uid, r.PathValue("id"))
+	if err == nil {
+		// whoever logged in with the deleted passkey must not stay logged in
+		c, _ := r.Cookie(sessionCookie) // present: auth() checked it
+		if _, err = s.cfg.Store.DeleteOtherAuthSessions(r.Context(), uid, c.Value); err != nil {
+			s.internal(w, r, fmt.Errorf("end other sessions: %w", err))
+			return
+		}
+	}
 	switch {
 	case errors.Is(err, store.ErrNotFound):
 		httpError(w, http.StatusNotFound, "passkey not found")

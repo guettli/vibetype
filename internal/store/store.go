@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite" // CGO-free SQLite driver
@@ -18,6 +19,9 @@ import (
 
 // ErrNotFound is returned when a row does not exist.
 var ErrNotFound = errors.New("not found")
+
+// ErrDuplicate is returned when a row with the same unique key exists.
+var ErrDuplicate = errors.New("already exists")
 
 // ErrLastPasskey is returned when deleting a user's only passkey (it would lock the account).
 var ErrLastPasskey = errors.New("cannot delete the last passkey")
@@ -168,6 +172,8 @@ type User struct {
 	ID          string    `json:"id"`
 	DisplayName string    `json:"display_name"`
 	CreatedAt   time.Time `json:"created_at"`
+	// LoggedInAt is when the current login session was created (set by UserForToken only).
+	LoggedInAt time.Time `json:"-"`
 }
 
 type Passkey struct {
@@ -253,8 +259,8 @@ func (s *Store) CreateAuthSession(ctx context.Context, userID string, ttl time.D
 // UserForToken resolves a session token; ErrNotFound if unknown or expired.
 func (s *Store) UserForToken(ctx context.Context, token string) (User, error) {
 	var u User
-	err := s.db.QueryRowContext(ctx, `SELECT u.id, u.display_name, u.created_at FROM auth_sessions a JOIN users u ON u.id=a.user_id
-		WHERE a.token_hash=? AND a.expires_at > ?`, hashToken(token), s.now()).Scan(&u.ID, &u.DisplayName, &u.CreatedAt)
+	err := s.db.QueryRowContext(ctx, `SELECT u.id, u.display_name, u.created_at, a.created_at FROM auth_sessions a JOIN users u ON u.id=a.user_id
+		WHERE a.token_hash=? AND a.expires_at > ?`, hashToken(token), s.now()).Scan(&u.ID, &u.DisplayName, &u.CreatedAt, &u.LoggedInAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return u, ErrNotFound
 	}
@@ -775,7 +781,19 @@ type PasskeyInfo struct {
 func (s *Store) AddPasskey(ctx context.Context, pk Passkey, label string) error {
 	_, err := s.db.ExecContext(ctx, `INSERT INTO passkeys(id, user_id, public_key, sign_count, credential, created_at, label) VALUES(?,?,?,?,?,?,?)`,
 		pk.ID, pk.UserID, pk.PublicKey, pk.SignCount, pk.Credential, s.now(), label)
+	if err != nil && strings.Contains(err.Error(), "UNIQUE constraint failed") {
+		return ErrDuplicate
+	}
 	return err
+}
+
+// DeleteOtherAuthSessions logs the user out everywhere except the session of keepToken.
+func (s *Store) DeleteOtherAuthSessions(ctx context.Context, userID, keepToken string) (int64, error) {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM auth_sessions WHERE user_id=? AND token_hash != ?`, userID, hashToken(keepToken))
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 // ListPasskeys lists a user's passkeys, oldest first.

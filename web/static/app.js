@@ -61,7 +61,7 @@ function h(tag, attrs = {}, ...children) {
 // ---------- API ----------
 
 class ApiError extends Error {
-  constructor(status, message) { super(message); this.status = status; }
+  constructor(status, message, code) { super(message); this.status = status; this.code = code; }
 }
 
 const API_TIMEOUT_MS = 15000;
@@ -79,7 +79,7 @@ async function api(method, path, body) {
   });
   if (res.status === 204) return null;
   const data = await res.json().catch(() => ({ error: `HTTP ${res.status}` }));
-  if (!res.ok) throw new ApiError(res.status, data.error || `HTTP ${res.status}`);
+  if (!res.ok) throw new ApiError(res.status, data.error || `HTTP ${res.status}`, data.code);
   return data;
 }
 
@@ -454,6 +454,19 @@ async function homeView() {
 
 // ---------- account: name and passkeys ----------
 
+// withReauth runs fn; if the server wants a fresh login first (changing passkeys),
+// it signs in with a passkey again and retries once.
+async function withReauth(fn) {
+  try { return await fn(); }
+  catch (err) {
+    if (err.code !== 'reauth_required') throw err;
+    me = await loginPasskey();
+    ls.set('me', me);
+    renderUser();
+    return fn();
+  }
+}
+
 async function accountView() {
   const name = h('input', { type: 'text', value: me.display_name, maxlength: 64, required: true, 'aria-label': 'Anzeigename' });
   const label = h('input', { type: 'text', placeholder: 'Bezeichnung, z. B. Handy oder PC zu Hause', maxlength: 40, 'aria-label': 'Bezeichnung des neuen Passkeys' });
@@ -461,14 +474,15 @@ async function accountView() {
   const msg = h('p', { class: 'bad', 'aria-live': 'polite' });
 
   function renderPasskeys(pks) {
-    fill(list, pks.map((p, i) => h('li', {},
-      h('b', {}, p.label || `Passkey ${i + 1}`), ' ',
+    const name = (p) => p.label || `Passkey vom ${fmtDate(p.created_at)}`; // stable, unlike a position number
+    fill(list, pks.map((p) => h('li', {},
+      h('b', {}, name(p)), ' ',
       h('span', { class: 'muted' }, `angelegt ${fmtDate(p.created_at)}`, p.last_used_at ? `, zuletzt benutzt ${fmtDate(p.last_used_at)}` : ''), ' ',
       pks.length > 1 ? h('button', {
         class: 'link danger',
         onclick: async () => {
-          if (!confirm(`Passkey „${p.label || `Passkey ${i + 1}`}“ löschen? Mit diesem Gerät kannst du dich danach nicht mehr anmelden.`)) return;
-          try { await api('DELETE', '/api/me/passkeys/' + encodeURIComponent(p.id)); renderPasskeys(await api('GET', '/api/me/passkeys')); }
+          if (!confirm(`Passkey „${name(p)}“ löschen? Mit diesem Gerät kannst du dich danach nicht mehr anmelden, und alle anderen Anmeldungen werden beendet.`)) return;
+          try { await withReauth(() => api('DELETE', '/api/me/passkeys/' + encodeURIComponent(p.id))); renderPasskeys(await api('GET', '/api/me/passkeys')); }
           catch (err) { msg.textContent = `Löschen fehlgeschlagen: ${err.message}`; }
         },
       }, 'löschen') : null)));
@@ -495,7 +509,7 @@ async function accountView() {
         onsubmit: async (e) => {
           e.preventDefault();
           msg.textContent = '';
-          try { renderPasskeys(await createPasskey('/api/me/passkeys/begin', { label: label.value }, '/api/me/passkeys/finish')); label.value = ''; }
+          try { renderPasskeys(await withReauth(() => createPasskey('/api/me/passkeys/begin', { label: label.value }, '/api/me/passkeys/finish'))); label.value = ''; }
           catch (err) {
             msg.textContent = err.name === 'InvalidStateError'
               ? 'Dieses Gerät hat schon einen Passkey für dein Konto.'
