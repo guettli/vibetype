@@ -8,9 +8,14 @@ jeder Nutzer kann Texte anlegen, per Link/Code teilen und sieht live, wer seinen
 * **Local-First:** Die Tipp-Logik läuft komplett im Browser. Ein Sync-Loop schickt den Fortschritt alle 3 s an den
   Server; offline wird gepuffert (`localStorage`), ein Service Worker hält die App-Shell vor.
 * **Pausen zählen nicht:** Anschläge/min beziehen sich auf die aktive Tippzeit. Eine Lücke zwischen zwei Anschlägen
-  zählt höchstens 3 Sekunden, eine Pause zum Lesen, Reden oder wegen der Schulglocke drückt also nicht die
-  Geschwindigkeit. Die Zusammenfassung zeigt Tippzeit und Pausenzeit getrennt. Die Spalte „Zeit“ in den Ergebnissen
-  ist die Gesamtdauer vom ersten bis zum letzten Anschlag.
+  zählt höchstens bis zur Pausenschwelle. Die liegt bei mindestens 3 Sekunden oder beim Vierfachen des eigenen
+  Rhythmus, falls das mehr ist. Wer für jede Taste 5 Sekunden braucht, macht also keine „Pausen“ und wird nicht
+  schöngerechnet. Eine Pause zum Lesen, Reden oder wegen der Schulglocke drückt dagegen nicht die Geschwindigkeit. Die
+  Zusammenfassung zeigt Tippzeit und Pausenzeit getrennt, die Ergebnisse zeigen die Tippzeit. Der Client sendet sie als
+  `active_ms`. Durchgänge älterer Versionen haben kein `active_ms`, ihre Anschläge/min enthalten Pausen und sind nicht
+  vergleichbar. Deshalb vergleicht die Bestleistung nur gleich gemessene Durchgänge, und neu gemessene gehen beim ★ vor.
+  Hat ein Durchgang Anschläge ohne Zeitmessung (alter Tab, zweiter Tab auf demselben Text), zählt für ihn die
+  Gesamtdauer.
 * **Stop-on-Error:** Bei einem Tippfehler bleibt der Cursor stehen und das Zeichen „wackelt“ rot, bis die richtige
   Taste kommt.
 * **Bildschirmtastatur mit Fingerhinweisen:** Unter dem Text zeigt eine Tastatur (QWERTZ oder QWERTY) die nächste
@@ -141,7 +146,8 @@ verwechselbare Zeichen (kein 0/o, 1/l/i).
 
 ### Sync-Protokoll
 
-`PUT /api/sessions/{client-uuid}` mit `{text_id, cursor_pos, error_count, cpm, started_at, finished_at, key_errors}`.
+`PUT /api/sessions/{client-uuid}` mit `{text_id, cursor_pos, error_count, cpm, started_at, finished_at, key_errors, active_ms}`.
+`active_ms` ist optional oder `null` und muss zwischen 0 und der verstrichenen Zeit liegen (1 Minute Toleranz).
 `key_errors` ist optional (ältere Clients senden es nicht). Jeder Schlüssel muss genau ein Zeichen sein, das im Text
 vorkommt, jeder Wert muss zwischen 1 und `error_count` liegen, und die Summe darf `error_count` nicht übersteigen.
 

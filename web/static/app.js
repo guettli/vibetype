@@ -1,5 +1,5 @@
 // vibetype frontend – vanilla ES module, no build step.
-import { newSession, chars, keyToChar, press, cpm, accuracy, syncPayload, MAX_CPM, activeMs, wallMs } from './engine.js';
+import { newSession, chars, keyToChar, press, cpm, accuracy, syncPayload, MAX_CPM, activeMs, wallMs, upgrade } from './engine.js';
 import { LAYOUTS, locate, hint, defaultLayout } from './keyboard.js';
 
 const SYNC_INTERVAL_MS = 3000;
@@ -609,7 +609,7 @@ async function loadResults($el, resultsReq) {
   const best = new Set(data.best.map((b) => b.id)); // computed over all runs, not only the listed ones
   fill($el, results.length >= limit ? h('p', { class: 'muted' }, `Die letzten ${limit} Durchgänge:`) : null, h('table', { class: 'results' },
     h('thead', {}, h('tr', {}, h('th', {}, 'Datum'), h('th', {}, 'Text'), h('th', {}, 'Fortschritt'), h('th', { class: 'num' }, 'Anschl./min'),
-      h('th', { class: 'num' }, 'Fehler'), h('th', { class: 'num' }, 'Genauigkeit'), h('th', { class: 'num' }, 'Zeit'))),
+      h('th', { class: 'num' }, 'Fehler'), h('th', { class: 'num' }, 'Genauigkeit'), h('th', { class: 'num', title: 'aktive Tippzeit ohne Pausen; bei alten Durchgängen die Gesamtdauer' }, 'Tippzeit'))),
     h('tbody', {}, results.map((r) => h('tr', {},
       h('td', {}, fmtDate(r.started_at)),
       h('td', {}, h('a', { href: '/t/' + r.text_id, 'data-link': true }, r.text_title), best.has(r.id) ? h('span', { class: 'best', title: 'Bestleistung' }, ' ★') : null),
@@ -617,7 +617,7 @@ async function loadResults($el, resultsReq) {
       h('td', { class: 'num' }, r.cpm),
       h('td', { class: 'num' }, r.error_count),
       h('td', { class: 'num' }, resultAccuracy(r), ' %'),
-      h('td', { class: 'num' }, r.finished_at ? fmtDuration(Date.parse(r.finished_at) - Date.parse(r.started_at)) : '–'),
+      h('td', { class: 'num' }, r.active_ms != null ? fmtDuration(r.active_ms) : r.finished_at ? fmtDuration(Date.parse(r.finished_at) - Date.parse(r.started_at)) : '–'),
     )))));
 }
 
@@ -655,6 +655,7 @@ async function typingView(textId) {
   const textChars = chars(text.content);
   const stateKey = 'session:' + textId;
   let state = us.get(stateKey);
+  if (state) upgrade(state);
   if (!state) { state = newSession(crypto.randomUUID(), textId); us.set(stateKey, state); }
 
   const $done = h('span', { class: 'done' });
@@ -672,9 +673,13 @@ async function typingView(textId) {
     .then(() => api('GET', '/api/me/results?text_id=' + encodeURIComponent(textId)))
     .then(({ results }) => { serverRuns = results; renderSummary(); })
     .catch((err) => { if (!isOffline(err)) fail(`Ergebnisse konnten nicht geladen werden: ${err.message}`); });
-  const previousBest = () => bestOf([...(serverRuns ?? []), ...us.get(historyKey, [])].filter((r) => r.id !== state.id));
+  // Runs measured without pauses (active_ms) and older wall-time runs are not comparable.
+  const earlierRuns = () => [...(serverRuns ?? []), ...us.get(historyKey, [])].filter((r) => r.id !== state.id);
+  const comparable = (r) => (r.active_ms != null) === (state.activeMs !== undefined);
+  const previousBest = () => bestOf(earlierRuns().filter(comparable));
   function rememberFinished() {
-    const run = { id: state.id, cpm: cpm(state, Date.now()), cursor_pos: state.cursor, error_count: state.errors, finished_at: state.finishedAt };
+    const run = { id: state.id, cpm: cpm(state, Date.now()), cursor_pos: state.cursor, error_count: state.errors, finished_at: state.finishedAt,
+      active_ms: syncPayload(state, Date.now()).active_ms };
     us.set(historyKey, [...us.get(historyKey, []), run].slice(-50));
   }
   const kb = keyboardWidget(() => { if (document.activeElement !== $typing) $typing.focus(); });
@@ -707,7 +712,8 @@ async function typingView(textId) {
     const pauseMs = wallMs(state, 0) - activeMs(state, 0);
     const best = previousBest();
     let verdict = null;
-    if (!best) verdict = serverRuns ? h('p', {}, 'Dein erstes Ergebnis für diesen Text.') : null; // offline: unknown
+    if (!best && earlierRuns().some((r) => r.finished_at)) verdict = h('p', {}, 'Deine früheren Durchgänge wurden noch ohne Pausen-Abzug gemessen und sind nicht vergleichbar. Dies ist deine erste Bestleistung nach der neuen Messung.');
+    else if (!best) verdict = serverRuns ? h('p', {}, 'Dein erstes Ergebnis für diesen Text.') : null; // offline: unknown
     else if (myCpm > best.cpm) verdict = h('p', { class: 'good' }, `★ Neue Bestleistung! Vorher ${best.cpm} Anschläge/min.`);
     else verdict = h('p', {}, `Deine Bestleistung: ${best.cpm} Anschläge/min (${resultAccuracy(best)} % Genauigkeit).`);
     fill($summary, ...[
