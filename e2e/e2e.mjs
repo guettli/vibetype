@@ -44,10 +44,19 @@ const B = await newUser('Bob'); step('Bob registered');
 await B.page.goto(`${BASE}/t/${slug}`);
 await B.page.waitForSelector('.typing');
 if (await B.page.$('.live')) throw new Error('Bob must not see live view');
+// on-screen keyboard: "H" = right index finger + LEFT shift (other hand)
+await B.page.evaluate(() => localStorage.setItem('vt:prefs', JSON.stringify({ keyboard: true, layout: 'de' })));
+await B.page.reload();
+await B.page.waitForSelector('.key.next');
+const nextKeys = await B.page.$$eval('.key.next', (els) => els.map((e) => e.textContent));
+const kbHint = await B.page.textContent('.kb-hint');
+if (nextKeys.length !== 2 || !kbHint.includes('rechter Zeigefinger + linke Umschalttaste')) throw new Error(`keyboard hint wrong: ${nextKeys} / ${kbHint}`);
+step('keyboard hint: ' + kbHint);
 await B.page.keyboard.type('Hal');
 await B.page.keyboard.press('x');
 const flashed = await B.page.$eval('.cur', (el) => el.classList.contains('error-flash') && el.textContent);
 if (flashed !== 'l') throw new Error('expected error flash on "l", got ' + flashed);
+if (!await B.page.$('.key.wrong')) throw new Error('wrong key not flashed on keyboard');
 await B.page.keyboard.press('Shift'); // modifier ignored
 await B.page.keyboard.type('lo');
 const done = await B.page.$eval('.done', (el) => el.textContent);

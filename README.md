@@ -9,6 +9,11 @@ jeder Nutzer kann Texte anlegen, per Link/Code teilen und sieht live, wer seinen
   Server; offline wird gepuffert (`localStorage`), ein Service Worker hält die App-Shell vor.
 * **Stop-on-Error:** Bei einem Tippfehler bleibt der Cursor stehen und das Zeichen „wackelt“ rot, bis die richtige
   Taste kommt.
+* **Bildschirmtastatur mit Fingerhinweisen:** Unter dem Text zeigt eine Tastatur (QWERTZ oder QWERTY) die nächste
+  Taste, die nötige Umschalt- bzw. AltGr-Taste und den Finger dafür („rechter Zeigefinger + linke Umschalttaste“). Die
+  Tasten sind nach Finger eingefärbt, F und J haben die Tastmarke. Eine falsch gedrückte Taste blinkt rot. Ein- und
+  Ausblenden sowie das Layout merkt sich der Browser. Voreinstellung: QWERTZ bei deutscher Browsersprache, sonst
+  QWERTY. Großschreibung folgt der 10-Finger-Regel: Shift drückt der kleine Finger der jeweils anderen Hand.
 * **Passkeys:** Login per WebAuthn (discoverable credentials), ohne Passwort und ohne E-Mail. Sitzung per HTTP-only-Cookie.
 
 ## Stack
@@ -55,7 +60,7 @@ Docker: `docker build -t vibetype . && docker run -p 8080:8080 -v vibetype:/data
 
 ```sh
 go test ./...                       # Normalisierung, API, Sync-Semantik, Rechte, CSRF, Limits, Nebenläufigkeit
-node --test web/test/*.test.mjs     # Tipp-Engine (Stop-on-Error, CPM, Genauigkeit)
+node --test web/test/*.test.mjs     # Tipp-Engine (Stop-on-Error, CPM, Genauigkeit), Tastatur-Layouts/Finger
 # E2E (Chromium mit virtuellem Passkey-Authenticator):
 go run . -addr :8099 -origin http://localhost:8099 -db /tmp/e2e.db &
 (cd e2e && npm install && npx playwright install chromium && node e2e.mjs)

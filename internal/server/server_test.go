@@ -165,7 +165,7 @@ func TestTextsAndSync(t *testing.T) {
 
 func TestStaticAndSPA(t *testing.T) {
 	e := newEnv(t)
-	for _, p := range []string{"/", "/t/abc123", "/static/app.js", "/static/engine.js", "/static/style.css", "/sw.js", "/healthz"} {
+	for _, p := range []string{"/", "/t/abc123", "/static/app.js", "/static/engine.js", "/static/keyboard.js", "/static/style.css", "/sw.js", "/healthz"} {
 		if c := e.do("", "GET", p, nil, nil); c != 200 {
 			t.Errorf("GET %s: %d", p, c)
 		}

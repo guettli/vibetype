@@ -1,7 +1,7 @@
 // Service worker: caches the app shell so /t/{id} opens without network.
 // Texts and unsynced progress live in localStorage (see app.js).
-const CACHE = 'vibetype-v2';
-const SHELL = ['/', '/static/app.js', '/static/engine.js', '/static/style.css'];
+const CACHE = 'vibetype-v3';
+const SHELL = ['/', '/static/app.js', '/static/engine.js', '/static/keyboard.js', '/static/style.css'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));

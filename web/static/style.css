@@ -67,3 +67,29 @@ tr.active td:last-child { color: var(--ok); }
 .bar .fill { height: 100%; background: var(--accent); }
 @media (max-width: 600px) { .typing { font-size: 18px; } .bar { width: 60px; } }
 .typing .cur:empty { display: none; }
+
+/* on-screen keyboard */
+:root { --f-lp: #f4d6e4; --f-lr: #f8e2c4; --f-lm: #fbf1bd; --f-li: #d6efd0; --f-ri: #cfe9f3; --f-rm: #dcdcf7; --f-rr: #ead6f3; --f-rp: #f3d2d2; --f-th: #e4e2dc; --key-fg: #1d1d1b; }
+@media (prefers-color-scheme: dark) {
+  :root { --f-lp: #5a3346; --f-lr: #5a4428; --f-lm: #57502a; --f-li: #2f4f2c; --f-ri: #2b4954; --f-rm: #3a3a5e; --f-rr: #4a3555; --f-rp: #573434; --f-th: #3a3936; --key-fg: #ececea; }
+}
+.kb-wrap { margin-top: 16px; }
+.kb-controls { display: flex; gap: 12px; align-items: center; font-size: 14px; }
+.kb-controls input { width: auto; margin: 0; }
+.kb-controls select { font: inherit; font-size: 14px; padding: 2px 6px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); }
+.kb-hint { min-height: 1.5em; margin: 8px 0; font-weight: 600; }
+.kb { display: flex; flex-direction: column; gap: 4px; max-width: 760px; user-select: none; }
+.kb-row { display: flex; gap: 4px; }
+.key { flex: 1 1 0; min-width: 0; height: 40px; border-radius: 6px; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  font: 15px/1 var(--mono); color: var(--key-fg); border: 1px solid transparent; position: relative; }
+.key .sub { font-size: 10px; opacity: 0.6; margin-bottom: 2px; }
+.key.mod { background: var(--bg); color: var(--muted); border-color: var(--line); }
+.key.bump::after { content: ''; position: absolute; bottom: 6px; width: 10px; height: 2px; background: currentColor; opacity: 0.6; border-radius: 1px; }
+.f-lp { background: var(--f-lp); } .f-lr { background: var(--f-lr); } .f-lm { background: var(--f-lm); } .f-li { background: var(--f-li); }
+.f-ri { background: var(--f-ri); } .f-rm { background: var(--f-rm); } .f-rr { background: var(--f-rr); } .f-rp { background: var(--f-rp); }
+.f-th { background: var(--f-th); }
+.key.mod.f-lp, .key.mod.f-rp, .key.mod.f-th { background: var(--bg); }
+.key.next { outline: 3px solid var(--accent); outline-offset: -1px; font-weight: 700; transform: translateY(-1px); box-shadow: 0 2px 6px rgba(0,0,0,.15); }
+.key.wrong { animation: key-wrong 0.4s ease; }
+@keyframes key-wrong { 0%, 60% { background: var(--bad); color: #fff; } }
+@media (max-width: 600px) { .key { height: 30px; font-size: 12px; } .key .sub { display: none; } }

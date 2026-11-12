@@ -1,5 +1,6 @@
 // vibetype frontend – vanilla ES module, no build step.
 import { newSession, chars, keyToChar, press, cpm, accuracy, syncPayload } from './engine.js';
+import { LAYOUTS, locate, hint, defaultLayout } from './keyboard.js';
 
 const SYNC_INTERVAL_MS = 3000;
 const LIVE_INTERVAL_MS = 3000;
@@ -245,6 +246,70 @@ function loginView() {
   );
 }
 
+// ---------- on-screen keyboard ----------
+// Preferences are per browser (global, not per user): { keyboard: bool, layout: 'de'|'us' }
+
+function prefs() {
+  return { keyboard: true, layout: defaultLayout(navigator.language), ...ls.get('prefs', {}) };
+}
+function setPref(key, value) { ls.set('prefs', { ...ls.get('prefs', {}), [key]: value }); }
+
+// keyboardWidget returns { el, show(nextChar), wrong(typedChar) }.
+function keyboardWidget() {
+  const $kb = h('div', { class: 'kb', 'aria-hidden': 'true' });
+  const $hint = h('div', { class: 'kb-hint' });
+  const $toggle = h('input', { type: 'checkbox' });
+  const $layout = h('select', {}, Object.entries(LAYOUTS).map(([id, l]) => h('option', { value: id }, l.name)));
+  const el = h('div', { class: 'kb-wrap' },
+    h('div', { class: 'kb-controls muted' },
+      h('label', {}, $toggle, ' Tastatur anzeigen'), ' ', $layout),
+    $hint, $kb);
+  let keys = {};
+  let next = null;
+
+  function build() {
+    const p = prefs();
+    $toggle.checked = p.keyboard;
+    $layout.value = p.layout;
+    $layout.hidden = !p.keyboard;
+    $kb.hidden = $hint.hidden = !p.keyboard;
+    keys = {};
+    $kb.replaceChildren(...LAYOUTS[p.layout].rows.map((row) => h('div', { class: 'kb-row' }, row.map((key) => {
+      const label = key.mod ? key.label : key.id === 'Space' ? '' : key.id === 'Enter' ? '↵' : (key.shift && key.base.toUpperCase() === key.shift ? key.shift : key.base);
+      const $k = h('div', { class: `key f-${key.finger}${key.mod ? ' mod' : ''}${['f', 'j'].includes(key.id) ? ' bump' : ''}` },
+        key.shift && key.base.toUpperCase() !== key.shift ? h('span', { class: 'sub' }, key.shift) : null,
+        label);
+      $k.style.flexGrow = String(key.width); // CSSOM is allowed by the CSP, style attributes are not
+      keys[key.id] = $k;
+      return $k;
+    }))));
+    if (next !== null) show(next);
+  }
+  function show(ch) {
+    next = ch;
+    for (const $k of Object.values(keys)) $k.classList.remove('next');
+    if (ch === null || !prefs().keyboard) { $hint.textContent = ''; return; }
+    const layout = prefs().layout;
+    const loc = locate(ch, layout);
+    $hint.textContent = (ch === ' ' ? 'Leertaste' : ch === '\n' ? 'Enter' : `„${ch}“`) + ': ' + hint(ch, layout);
+    if (!loc) return;
+    keys[loc.key]?.classList.add('next');
+    if (loc.modifier) keys[loc.modifier]?.classList.add('next');
+  }
+  function wrong(ch) {
+    const loc = prefs().keyboard && locate(ch, prefs().layout);
+    const $k = loc && keys[loc.key];
+    if (!$k) return;
+    $k.classList.remove('wrong');
+    void $k.offsetWidth;
+    $k.classList.add('wrong');
+  }
+  $toggle.addEventListener('change', () => { setPref('keyboard', $toggle.checked); build(); $toggle.blur(); });
+  $layout.addEventListener('change', () => { setPref('layout', $layout.value); build(); $layout.blur(); });
+  build();
+  return { el, show, wrong };
+}
+
 // ---------- routing ----------
 
 let teardown = () => {};
@@ -341,6 +406,7 @@ async function typingView(textId) {
   const $rest = h('span', { class: 'rest' });
   const $typing = h('div', { class: 'typing', tabindex: 0 }, $done, $cur, $rest);
   const $stats = h('div', { class: 'stats' });
+  const kb = keyboardWidget();
   const $live = h('div', { class: 'live' });
   const shareUrl = `${location.origin}/t/${text.id}`;
 
@@ -349,6 +415,7 @@ async function typingView(textId) {
     $done.textContent = textChars.slice(0, state.cursor).join('');
     $cur.textContent = state.cursor < textChars.length ? display(textChars[state.cursor]) : '';
     $rest.textContent = textChars.slice(state.cursor + 1).join('');
+    kb.show(state.cursor < textChars.length ? textChars[state.cursor] : null);
     renderStats();
   }
   function renderStats() {
@@ -374,13 +441,13 @@ async function typingView(textId) {
   }
 
   function onKey(ev) {
-    if (document.activeElement && ['INPUT', 'TEXTAREA'].includes(document.activeElement.tagName)) return;
+    if (document.activeElement && ['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName)) return;
     const ch = keyToChar(ev);
     if (ch === null) return;
     ev.preventDefault(); // no page scroll on space, no Firefox quick-find on ' and /
     const result = press(state, textChars, ch, Date.now());
     if (result === 'ignored') return;
-    if (result === 'error') flash();
+    if (result === 'error') { flash(); kb.wrong(ch); }
     us.set(stateKey, state);
     enqueue(state); // dirty flag: picked up by the sync loop
     render();
@@ -444,6 +511,7 @@ async function typingView(textId) {
       ),
       $typing,
       $stats,
+      kb.el,
     ),
     ...(isCreator ? [h('section', { class: 'card' }, $live)] : []),
   );
