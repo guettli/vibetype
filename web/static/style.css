@@ -151,3 +151,12 @@ table.weak td { border-bottom: 0; padding: 4px 8px; }
 ul.passkeys { list-style: none; padding: 0; margin: 0 0 12px; }
 ul.passkeys li { padding: 6px 0; border-bottom: 1px solid var(--line); }
 #user a { color: var(--fg); }
+
+/* progress charts */
+figure.chart { margin: 12px 0 0; }
+figure.chart figcaption { font-size: 14px; color: var(--muted); }
+figure.chart svg { display: block; width: 100%; height: auto; }
+figure.chart .grid { stroke: var(--line); stroke-width: 1; }
+figure.chart .line { fill: none; stroke: var(--accent); stroke-width: 2; stroke-linejoin: round; }
+figure.chart circle { fill: var(--accent); }
+figure.chart text { fill: var(--muted); font-size: 11px; font-family: system-ui, sans-serif; }

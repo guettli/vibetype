@@ -70,6 +70,15 @@ CREATE TABLE IF NOT EXISTS typing_sessions (
 );
 CREATE INDEX IF NOT EXISTS typing_sessions_text ON typing_sessions(text_id, updated_at);
 CREATE INDEX IF NOT EXISTS typing_sessions_user ON typing_sessions(user_id, started_at);
+CREATE INDEX IF NOT EXISTS typing_sessions_user_updated ON typing_sessions(user_id, updated_at);
+-- local calendar days (YYYY-MM-DD, the typist's time zone) with at least one key
+-- press, for the practice streak. Separate from typing_sessions so that pruning
+-- or deleting sessions and texts does not shorten a streak after the fact.
+CREATE TABLE IF NOT EXISTS practice_days (
+	user_id TEXT NOT NULL REFERENCES users(id),
+	day     TEXT NOT NULL,
+	PRIMARY KEY (user_id, day)
+) WITHOUT ROWID;
 -- login sessions (HTTP-only cookie); only the SHA-256 of the token is stored
 CREATE TABLE IF NOT EXISTS auth_sessions (
 	token_hash TEXT PRIMARY KEY,
@@ -95,9 +104,23 @@ func Open(path string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", path, err)
 	}
+	var hadPracticeDays int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='practice_days'`).Scan(&hadPracticeDays); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("open %s: %w", path, err)
+	}
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("migrate %s: %w", path, err)
+	}
+	if hadPracticeDays == 0 {
+		// Sessions from before practice_days: their UTC day of the last sync is the
+		// best there is. updated_at is always written in UTC ("2006-01-02 ...").
+		if _, err := db.Exec(`INSERT OR IGNORE INTO practice_days(user_id, day)
+			SELECT user_id, substr(updated_at, 1, 10) FROM typing_sessions WHERE cursor_pos > 0`); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("migrate %s: backfill practice_days: %w", path, err)
+		}
 	}
 	for _, c := range []struct{ table, column, decl string }{
 		{"typing_sessions", "key_errors", `TEXT NOT NULL DEFAULT '{}'`},
@@ -371,6 +394,9 @@ type TypingSession struct {
 	// ActiveMS is the typing time without pauses; nil for runs of older clients,
 	// whose cpm includes pauses and is therefore not comparable.
 	ActiveMS *int64 `json:"active_ms"`
+	// PracticeDays are the typist's local days (YYYY-MM-DD) with key presses in
+	// this session; UpsertTypingSession adds them to practice_days.
+	PracticeDays []string `json:"-"`
 }
 
 // UpsertTypingSession creates or updates a typing session owned by ts.UserID.
@@ -442,6 +468,11 @@ func (s *Store) UpsertTypingSession(ctx context.Context, ts TypingSession, maxPe
 		ts.ID, ts.TextID, ts.UserID, ts.CursorPos, ts.ErrorCount, ts.CPM, ts.StartedAt, ts.UpdatedAt, ts.FinishedAt, string(keyErrors), ts.ActiveMS)
 	if err != nil {
 		return ts, fmt.Errorf("upsert typing session: %w", err)
+	}
+	for _, day := range ts.PracticeDays {
+		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO practice_days(user_id, day) VALUES(?,?)`, ts.UserID, day); err != nil {
+			return ts, fmt.Errorf("record practice day: %w", err)
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return ts, err
@@ -524,6 +555,62 @@ func (s *Store) ResultsForUser(ctx context.Context, userID, textID string, limit
 			r.FinishedAt = &fin.Time
 		}
 		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// Activity is one typing session reduced to what the progress chart needs.
+type Activity struct {
+	UpdatedAt  time.Time  `json:"updated_at"`
+	FinishedAt *time.Time `json:"finished_at"`
+	CursorPos  int        `json:"cursor_pos"`
+	ErrorCount int        `json:"error_count"`
+	CPM        int        `json:"cpm"`
+	ActiveMS   *int64     `json:"active_ms"`
+}
+
+// Times are stored as text by the driver and compared as strings, so every
+// time parameter of a query must be in UTC like the stored values.
+
+// ActivitySince lists a user's sessions with at least one typed character and
+// a sync at or after since, newest first, at most limit.
+func (s *Store) ActivitySince(ctx context.Context, userID string, since time.Time, limit int) ([]Activity, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT updated_at, finished_at, cursor_pos, error_count, cpm, active_ms
+		FROM typing_sessions WHERE user_id=? AND cursor_pos > 0 AND updated_at >= ?
+		ORDER BY updated_at DESC LIMIT ?`, userID, since.UTC(), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Activity{}
+	for rows.Next() {
+		var a Activity
+		var fin sql.NullTime
+		if err := rows.Scan(&a.UpdatedAt, &fin, &a.CursorPos, &a.ErrorCount, &a.CPM, &a.ActiveMS); err != nil {
+			return nil, err
+		}
+		if fin.Valid {
+			a.FinishedAt = &fin.Time
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}
+
+// PracticeDaysSince returns a user's practice days (YYYY-MM-DD) from sinceDay on, oldest first.
+func (s *Store) PracticeDaysSince(ctx context.Context, userID, sinceDay string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT day FROM practice_days WHERE user_id=? AND day >= ? ORDER BY day`, userID, sinceDay)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var d string
+		if err := rows.Scan(&d); err != nil {
+			return nil, err
+		}
+		out = append(out, d)
 	}
 	return out, rows.Err()
 }
@@ -688,7 +775,7 @@ func (s *Store) WeakKeys(ctx context.Context, userID string, since time.Time, se
 	rows, err := s.db.QueryContext(ctx, `SELECT t.content, s.cursor_pos, s.key_errors
 		FROM typing_sessions s JOIN texts t ON t.id=s.text_id
 		WHERE s.user_id=? AND s.started_at >= ? AND (s.key_errors != '{}' OR s.error_count = 0)
-		ORDER BY s.started_at DESC LIMIT ?`, userID, since, sessions)
+		ORDER BY s.started_at DESC LIMIT ?`, userID, since.UTC(), sessions)
 	if err != nil {
 		return nil, err
 	}

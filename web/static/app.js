@@ -1,6 +1,7 @@
 // vibetype frontend – vanilla ES module, no build step.
 import { newSession, chars, keyToChar, press, cpm, accuracy, syncPayload, MAX_CPM, activeMs, wallMs, upgrade } from './engine.js';
 import { LAYOUTS, locate, hint, defaultLayout } from './keyboard.js';
+import { daily, streak, plot } from './progress.js';
 
 const SYNC_INTERVAL_MS = 3000;
 const LIVE_INTERVAL_MS = 3000;
@@ -55,6 +56,14 @@ function h(tag, attrs = {}, ...children) {
     if (c == null || c === false) continue;
     el.append(c instanceof Node ? c : String(c));
   }
+  return el;
+}
+
+// svg is h() for SVG elements (they need their namespace).
+function svg(tag, attrs = {}, ...children) {
+  const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
+  for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
+  for (const c of children.flat(Infinity)) if (c != null && c !== false) el.append(c instanceof Node ? c : String(c));
   return el;
 }
 
@@ -393,6 +402,7 @@ async function homeView() {
   const results = h('div', {}, h('p', { class: 'muted' }, 'lade …'));
   const lessonList = h('ol', { class: 'lessons' }, h('li', { class: 'muted' }, 'lade …'));
   const weak = h('div', {}, h('p', { class: 'muted' }, 'lade …'));
+  const progress = h('div', {}, h('p', { class: 'muted' }, 'lade …'));
   // shared by the lessons list and the results table; sync first so a run finished seconds ago is included
   const resultsReq = flush().then(() => api('GET', '/api/me/results'));
   resultsReq.catch(() => {}); // handled by each consumer
@@ -420,6 +430,7 @@ async function homeView() {
       h('h2', {}, 'Lektionen'),
       h('p', { class: 'muted' }, 'Ein Kurs für die deutsche QWERTZ-Tastatur: jede Lektion führt ein paar neue Tasten ein und nutzt nur Tasten, die du schon kennst.'),
       lessonList),
+    h('section', { class: 'card' }, h('h2', {}, 'Fortschritt'), progress),
     h('section', { class: 'card' }, h('h2', {}, 'Problemtasten'), weak),
     h('section', { class: 'card' }, h('h2', {}, 'Meine Texte'), list),
     h('section', { class: 'card' }, h('h2', {}, 'Meine Ergebnisse'), results),
@@ -427,6 +438,7 @@ async function homeView() {
   loadResults(results, resultsReq);
   loadLessons(lessonList, resultsReq);
   loadWeakKeys(weak, resultsReq);
+  loadProgress(progress, resultsReq);
 
   try {
     const texts = await api('GET', '/api/texts');
@@ -594,6 +606,60 @@ async function loadWeakKeys($el, synced) {
       h('td', { class: 'muted' }, locate(k.char, layout) ? hint(k.char, layout) : ''),
     )))),
     $btn,
+  );
+}
+
+const fmtNum = (v) => v.toLocaleString('de-DE', { maximumFractionDigits: 1 });
+const CHART = { width: 640, height: 170, left: 44, right: 12, top: 10, bottom: 24 };
+
+// chart draws one value of the daily points as a line with a dot per day.
+function chart(points, key, kind, n, caption, unit) {
+  const p = plot(points, key, kind, n, CHART);
+  const grid = [p.lo, (p.lo + p.hi) / 2, p.hi].map((v) => [
+    svg('line', { class: 'grid', x1: CHART.left, x2: CHART.width - CHART.right, y1: p.y(v), y2: p.y(v) }),
+    svg('text', { x: CHART.left - 6, y: p.y(v) + 4, 'text-anchor': 'end' }, fmtNum(v)),
+  ]);
+  const fmtDay = (d) => new Date(d + 'T12:00').toLocaleDateString('de-DE', { day: 'numeric', month: 'numeric' });
+  const xLabel = (i, text, anchor) => svg('text', { x: p.x(i), y: CHART.height - 6, 'text-anchor': anchor }, text);
+  return h('figure', { class: 'chart' },
+    h('figcaption', {}, caption),
+    svg('svg', { viewBox: `0 0 ${CHART.width} ${CHART.height}`, role: 'img', 'aria-label': caption },
+      grid,
+      xLabel(p.first, `vor ${n - 1 - p.first} Tagen`, 'start'), xLabel(n - 1, 'heute', 'end'),
+      svg('polyline', { class: 'line', points: p.coords.map((c) => `${c.x},${c.y}`).join(' ') }),
+      p.coords.map((c) => svg('circle', { cx: c.x, cy: c.y, r: 4 },
+        svg('title', {}, `${fmtDay(c.point.day)}: ${fmtNum(c.point[key])}${unit} (${c.point.runs} ${c.point.runs === 1 ? 'Durchgang' : 'Durchgänge'})`))),
+    ));
+}
+
+async function loadProgress($el, synced) {
+  let data;
+  try {
+    await synced.catch(() => {}); // the results request flushed pending progress first
+    data = await api('GET', '/api/me/progress');
+  } catch (err) {
+    fill($el, h('p', { class: isOffline(err) ? 'warn' : 'bad' }, isOffline(err) ? 'offline – Fortschritt nicht verfügbar' : err.message));
+    return;
+  }
+  const today = new Date();
+  const n = data.days;
+  const st = streak(data.practice_days, today, n);
+  const points = daily(data.runs, today, n);
+  const days = (k) => `${k} ${k === 1 ? 'Tag' : 'Tagen'}`;
+  let streakText;
+  if (st.days === 0) streakText = 'Heute noch nicht geübt.';
+  else if (st.today) streakText = `${st.capped ? 'Mindestens ' : ''}${st.days} ${st.days === 1 ? 'Tag' : 'Tage'} in Folge geübt, heute schon dabei.`;
+  else streakText = `${st.capped ? 'Mindestens ' : ''}${st.days} ${st.days === 1 ? 'Tag' : 'Tage'} in Folge geübt. Übe heute, damit die Serie weiterläuft.`;
+  fill($el,
+    h('p', { class: 'streak' }, h('b', {}, streakText), ' ',
+      h('span', { class: 'muted' }, `${st.practiceDays} ${st.practiceDays === 1 ? 'Übungstag' : 'Übungstage'} in den letzten ${days(n)}.`)),
+    data.truncated ? h('p', { class: 'warn' }, `In der Kurve werden nur die neuesten ${data.limit} Durchgänge berücksichtigt, ältere fehlen.`) : null,
+    points.length < 2
+      ? h('p', { class: 'muted' }, 'Die Kurve erscheint, sobald du an zwei Tagen einen Text beendet hast. Durchgänge aus älteren Versionen der App zählen nicht mit, ihre Zeit enthält Pausen.')
+      : [
+        chart(points, 'cpm', 'cpm', n, 'Anschläge/min (Median pro Tag, ohne Pausen)', ' Anschläge/min'),
+        chart(points, 'accuracy', 'accuracy', n, 'Genauigkeit in % pro Tag', ' %'),
+      ],
   );
 }
 

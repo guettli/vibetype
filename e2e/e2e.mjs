@@ -89,6 +89,31 @@ await A.page.waitForSelector('table.weak .keycap');
 const weakFirst = await A.page.$eval('table.weak tr', (el) => el.innerText.replace(/\s+/g, ' '));
 if (!weakFirst.startsWith('ö 50 %')) throw new Error('weak keys: ' + weakFirst);
 step('weak key: ' + weakFirst);
+
+// progress: today counts for the streak; a run typed offline over the last two
+// days and synced only now adds those days to the streak and a second chart day
+const streakText = await A.page.textContent('p.streak');
+if (!streakText.includes('1 Tag in Folge geübt, heute schon dabei. 1 Übungstag in')) throw new Error('streak: ' + streakText);
+await A.page.evaluate(async (len) => {
+  const fin = new Date(Date.now() - 2 * 86400000);
+  const local = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  const now = new Date();
+  const days = [-2, -1].map((i) => local(new Date(now.getFullYear(), now.getMonth(), now.getDate() + i)));
+  const res = await fetch('/api/sessions/' + crypto.randomUUID(), {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text_id: 'lek01', cursor_pos: len, error_count: 0, cpm: 90, active_ms: 60000,
+      started_at: new Date(fin - 120000).toISOString(), finished_at: fin.toISOString(), practice_days: days }),
+  });
+  if (!res.ok) throw new Error('sync: ' + res.status);
+}, lesson1.length);
+await A.page.reload();
+await A.page.waitForSelector('figure.chart');
+const charts = await A.page.$$eval('figure.chart', (fs) => fs.map((f) => f.querySelectorAll('circle').length));
+if (charts.join() !== '2,2') throw new Error('charts: ' + charts);
+const streak3 = await A.page.textContent('p.streak');
+if (!streak3.includes('3 Tage in Folge geübt, heute schon dabei. 3 Übungstage in')) throw new Error('streak after offline days: ' + streak3);
+if (process.env.SHOT_DIR) await A.page.locator('section:has(h2:text("Fortschritt"))').screenshot({ path: process.env.SHOT_DIR + '/progress.png' });
+step('progress: ' + streakText + ' → after syncing two offline days: ' + streak3 + ', charts with 2 days');
 await A.page.click('text=Übungstext für diese Tasten erstellen');
 await A.page.waitForSelector('h2:has-text("Übung: ö")');
 const practiceText = await A.page.textContent('.typing');
