@@ -64,7 +64,9 @@ type Server struct {
 
 type ceremony struct {
 	data    webauthn.SessionData
-	user    *waUser // only set during registration
+	user    *waUser // set during registration and when adding a passkey
+	addFor  string  // user id when an existing user adds another passkey
+	label   string  // label of that additional passkey
 	expires time.Time
 }
 
@@ -115,6 +117,11 @@ func (s *Server) routes() {
 	m.HandleFunc("POST /api/logout", s.logout)
 
 	m.HandleFunc("GET /api/me", s.auth(s.me))
+	m.HandleFunc("PUT /api/me", s.auth(s.renameMe))
+	m.HandleFunc("GET /api/me/passkeys", s.auth(s.listPasskeys))
+	m.HandleFunc("POST /api/me/passkeys/begin", s.auth(s.addPasskeyBegin))
+	m.HandleFunc("POST /api/me/passkeys/finish", s.auth(s.addPasskeyFinish))
+	m.HandleFunc("DELETE /api/me/passkeys/{id}", s.auth(s.deletePasskey))
 	m.HandleFunc("GET /api/texts", s.auth(s.listTexts))
 	m.HandleFunc("POST /api/texts", s.auth(s.createText))
 	m.HandleFunc("GET /api/texts/{id}", s.auth(s.getText))
@@ -139,6 +146,7 @@ func (s *Server) routes() {
 	}
 	m.HandleFunc("GET /{$}", index)
 	m.HandleFunc("GET /t/{id}", index)
+	m.HandleFunc("GET /konto", index)
 }
 
 // ---- helpers ----

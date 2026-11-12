@@ -188,13 +188,14 @@ const b64urlToBuf = (s) => {
 const bufToB64url = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf)))
   .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 
-async function registerPasskey(displayName) {
-  const { publicKey } = await api('POST', '/api/register/begin', { display_name: displayName });
+// createPasskey runs a registration ceremony: begin (with body) -> authenticator -> finish.
+async function createPasskey(beginPath, body, finishPath) {
+  const { publicKey } = await api('POST', beginPath, body);
   publicKey.challenge = b64urlToBuf(publicKey.challenge);
   publicKey.user.id = b64urlToBuf(publicKey.user.id);
   for (const c of publicKey.excludeCredentials || []) c.id = b64urlToBuf(c.id);
   const cred = await navigator.credentials.create({ publicKey });
-  return api('POST', '/api/register/finish', {
+  return api('POST', finishPath, {
     id: cred.id,
     rawId: bufToB64url(cred.rawId),
     type: cred.type,
@@ -207,6 +208,8 @@ async function registerPasskey(displayName) {
     },
   });
 }
+
+const registerPasskey = (displayName) => createPasskey('/api/register/begin', { display_name: displayName }, '/api/register/finish');
 
 async function loginPasskey() {
   const { publicKey } = await api('POST', '/api/login/begin');
@@ -262,7 +265,8 @@ async function logout() {
 function renderUser() {
   fill($user);
   if (!me) return;
-  $user.append(me.display_name, ' · ', h('button', { class: 'link', onclick: logout }, 'abmelden'));
+  $user.append(h('a', { href: '/konto', 'data-link': true, title: 'Konto und Passkeys' }, me.display_name), ' · ',
+    h('button', { class: 'link', onclick: logout }, 'abmelden'));
 }
 
 function loginView() {
@@ -375,6 +379,7 @@ async function route() {
   const m = location.pathname.match(/^\/t\/([a-z0-9]+)$/);
   if (!me) { fill($app, loginView()); return; }
   if (m) await typingView(m[1]);
+  else if (location.pathname === '/konto') await accountView();
   else await homeView();
 }
 
@@ -445,6 +450,63 @@ async function homeView() {
     fill(list, h('li', { class: isOffline(err) ? 'warn' : 'bad' },
       isOffline(err) ? 'offline – Liste nicht verfügbar' : err.message));
   }
+}
+
+// ---------- account: name and passkeys ----------
+
+async function accountView() {
+  const name = h('input', { type: 'text', value: me.display_name, maxlength: 64, required: true, 'aria-label': 'Anzeigename' });
+  const label = h('input', { type: 'text', placeholder: 'Bezeichnung, z. B. Handy oder PC zu Hause', maxlength: 40, 'aria-label': 'Bezeichnung des neuen Passkeys' });
+  const list = h('ul', { class: 'passkeys' }, h('li', { class: 'muted' }, 'lade …'));
+  const msg = h('p', { class: 'bad', 'aria-live': 'polite' });
+
+  function renderPasskeys(pks) {
+    fill(list, pks.map((p, i) => h('li', {},
+      h('b', {}, p.label || `Passkey ${i + 1}`), ' ',
+      h('span', { class: 'muted' }, `angelegt ${fmtDate(p.created_at)}`, p.last_used_at ? `, zuletzt benutzt ${fmtDate(p.last_used_at)}` : ''), ' ',
+      pks.length > 1 ? h('button', {
+        class: 'link danger',
+        onclick: async () => {
+          if (!confirm(`Passkey „${p.label || `Passkey ${i + 1}`}“ löschen? Mit diesem Gerät kannst du dich danach nicht mehr anmelden.`)) return;
+          try { await api('DELETE', '/api/me/passkeys/' + encodeURIComponent(p.id)); renderPasskeys(await api('GET', '/api/me/passkeys')); }
+          catch (err) { msg.textContent = `Löschen fehlgeschlagen: ${err.message}`; }
+        },
+      }, 'löschen') : null)));
+  }
+
+  fill($app,
+    h('section', { class: 'card narrow-wide' },
+      h('h2', {}, 'Anzeigename'),
+      h('form', {
+        class: 'row',
+        onsubmit: async (e) => {
+          e.preventDefault();
+          msg.textContent = '';
+          try { me = await api('PUT', '/api/me', { display_name: name.value }); ls.set('me', me); renderUser(); name.value = me.display_name; }
+          catch (err) { msg.textContent = `Umbenennen fehlgeschlagen: ${err.message}`; }
+        },
+      }, name, h('button', {}, 'Speichern'))),
+    h('section', { class: 'card narrow-wide' },
+      h('h2', {}, 'Passkeys'),
+      h('p', { class: 'muted' }, 'Mit jedem dieser Passkeys kannst du dich anmelden. Lege einen weiteren an, um dich auch auf einem anderen Gerät anzumelden (z. B. zu Hause), oder als Reserve.'),
+      list,
+      h('form', {
+        class: 'row',
+        onsubmit: async (e) => {
+          e.preventDefault();
+          msg.textContent = '';
+          try { renderPasskeys(await createPasskey('/api/me/passkeys/begin', { label: label.value }, '/api/me/passkeys/finish')); label.value = ''; }
+          catch (err) {
+            msg.textContent = err.name === 'InvalidStateError'
+              ? 'Dieses Gerät hat schon einen Passkey für dein Konto.'
+              : `Passkey konnte nicht angelegt werden: ${err.message}`;
+          }
+        },
+      }, label, h('button', { class: 'primary' }, 'Passkey hinzufügen')),
+      msg),
+  );
+  try { renderPasskeys(await api('GET', '/api/me/passkeys')); }
+  catch (err) { fill(list, h('li', { class: isOffline(err) ? 'warn' : 'bad' }, isOffline(err) ? 'offline – Passkeys nicht verfügbar' : err.message)); }
 }
 
 // ---------- results ----------

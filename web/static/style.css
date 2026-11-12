@@ -145,3 +145,9 @@ table.weak td { border-bottom: 0; padding: 4px 8px; }
   .live-card.present table { font-size: 16px; }
   .live-card.present .bar { width: 80px; }
 }
+
+/* account */
+.narrow-wide { max-width: 640px; }
+ul.passkeys { list-style: none; padding: 0; margin: 0 0 12px; }
+ul.passkeys li { padding: 6px 0; border-bottom: 1px solid var(--line); }
+#user a { color: var(--fg); }

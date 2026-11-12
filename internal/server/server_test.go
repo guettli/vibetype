@@ -168,7 +168,7 @@ func TestTextsAndSync(t *testing.T) {
 
 func TestStaticAndSPA(t *testing.T) {
 	e := newEnv(t)
-	for _, p := range []string{"/", "/t/abc123", "/static/app.js", "/static/engine.js", "/static/keyboard.js", "/static/style.css", "/sw.js", "/healthz"} {
+	for _, p := range []string{"/", "/t/abc123", "/konto", "/static/app.js", "/static/engine.js", "/static/keyboard.js", "/static/style.css", "/sw.js", "/healthz"} {
 		if c := e.do("", "GET", p, nil, nil); c != 200 {
 			t.Errorf("GET %s: %d", p, c)
 		}
@@ -489,5 +489,49 @@ func TestQR(t *testing.T) {
 	}
 	if c := e.do(tok, "GET", "/api/texts/nope42/qr.svg", nil, nil); c != 404 {
 		t.Fatalf("qr of unknown text: %d", c)
+	}
+}
+
+func TestAccount(t *testing.T) {
+	e := newEnv(t)
+	u, tok := e.login("Paula")
+	var me store.User
+	if c := e.do(tok, "PUT", "/api/me", map[string]string{"display_name": "  Paula   K. "}, &me); c != 200 || me.DisplayName != "Paula K." {
+		t.Fatalf("rename: %d %+v", c, me)
+	}
+	if c := e.do(tok, "PUT", "/api/me", map[string]string{"display_name": "vibetype"}, nil); c != 400 {
+		t.Fatalf("reserved rename: %d", c)
+	}
+	var pks []store.PasskeyInfo
+	if c := e.do(tok, "GET", "/api/me/passkeys", nil, &pks); c != 200 || len(pks) != 1 {
+		t.Fatalf("passkeys: %d %+v", c, pks)
+	}
+	if c := e.do(tok, "DELETE", "/api/me/passkeys/"+pks[0].ID, nil, nil); c != 409 {
+		t.Fatalf("deleting the last passkey must be refused: %d", c)
+	}
+	if err := e.st.AddPasskey(context.Background(), store.Passkey{ID: "second", UserID: u.ID, PublicKey: []byte{1}, Credential: []byte("{}")}, "Handy"); err != nil {
+		t.Fatal(err)
+	}
+	_, otherTok := e.login("Otto")
+	if c := e.do(otherTok, "DELETE", "/api/me/passkeys/second", nil, nil); c != 404 {
+		t.Fatalf("deleting someone else's passkey: %d", c)
+	}
+	if c := e.do(tok, "DELETE", "/api/me/passkeys/"+pks[0].ID, nil, nil); c != 204 {
+		t.Fatalf("delete: %d", c)
+	}
+	if e.do(tok, "GET", "/api/me/passkeys", nil, &pks); len(pks) != 1 || pks[0].Label != "Handy" {
+		t.Fatalf("after delete: %+v", pks)
+	}
+	var opts struct {
+		PublicKey struct {
+			ExcludeCredentials []any `json:"excludeCredentials"`
+		} `json:"publicKey"`
+	}
+	if c := e.do(tok, "POST", "/api/me/passkeys/begin", map[string]string{"label": "Laptop"}, &opts); c != 200 || len(opts.PublicKey.ExcludeCredentials) != 1 {
+		t.Fatalf("add begin: %d %+v", c, opts)
+	}
+	// the add ceremony cannot be used to sign up a new account
+	if c := e.do("", "POST", "/api/register/finish", map[string]string{}, nil); c != 400 {
+		t.Fatalf("finish without ceremony: %d", c)
 	}
 }

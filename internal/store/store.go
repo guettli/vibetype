@@ -19,6 +19,9 @@ import (
 // ErrNotFound is returned when a row does not exist.
 var ErrNotFound = errors.New("not found")
 
+// ErrLastPasskey is returned when deleting a user's only passkey (it would lock the account).
+var ErrLastPasskey = errors.New("cannot delete the last passkey")
+
 // ErrForbidden is returned when a row belongs to another user.
 var ErrForbidden = errors.New("forbidden")
 
@@ -34,7 +37,9 @@ CREATE TABLE IF NOT EXISTS passkeys (
 	public_key BLOB NOT NULL,
 	sign_count INTEGER NOT NULL,
 	credential BLOB NOT NULL,                  -- full webauthn.Credential as JSON (flags, transports, ...)
-	created_at DATETIME NOT NULL
+	created_at DATETIME NOT NULL,
+	label        TEXT NOT NULL DEFAULT '',     -- set by the user, e.g. "Laptop"
+	last_used_at DATETIME
 );
 CREATE INDEX IF NOT EXISTS passkeys_user ON passkeys(user_id);
 CREATE TABLE IF NOT EXISTS texts (
@@ -92,6 +97,8 @@ func Open(path string) (*Store, error) {
 	for _, c := range []struct{ table, column, decl string }{
 		{"typing_sessions", "key_errors", `TEXT NOT NULL DEFAULT '{}'`},
 		{"texts", "kind", `TEXT NOT NULL DEFAULT ''`},
+		{"passkeys", "label", `TEXT NOT NULL DEFAULT ''`},
+		{"passkeys", "last_used_at", `DATETIME`},
 	} {
 		if err := addColumnIfMissing(db, c.table, c.column, c.decl); err != nil {
 			db.Close()
@@ -216,7 +223,7 @@ func (s *Store) PasskeysForUser(ctx context.Context, userID string) ([]Passkey, 
 }
 
 func (s *Store) UpdatePasskey(ctx context.Context, pk Passkey) error {
-	res, err := s.db.ExecContext(ctx, `UPDATE passkeys SET sign_count=?, credential=? WHERE id=?`, pk.SignCount, pk.Credential, pk.ID)
+	res, err := s.db.ExecContext(ctx, `UPDATE passkeys SET sign_count=?, credential=?, last_used_at=? WHERE id=?`, pk.SignCount, pk.Credential, s.now(), pk.ID)
 	if err != nil {
 		return err
 	}
@@ -754,4 +761,75 @@ func (s *Store) CreatePracticeText(ctx context.Context, userID, title, content s
 		return t, fmt.Errorf("prune practice texts: %w", err)
 	}
 	return t, tx.Commit()
+}
+
+// PasskeyInfo is what a user sees about one of their passkeys.
+type PasskeyInfo struct {
+	ID         string     `json:"id"`
+	Label      string     `json:"label"`
+	CreatedAt  time.Time  `json:"created_at"`
+	LastUsedAt *time.Time `json:"last_used_at"`
+}
+
+// AddPasskey stores an additional passkey for an existing user.
+func (s *Store) AddPasskey(ctx context.Context, pk Passkey, label string) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO passkeys(id, user_id, public_key, sign_count, credential, created_at, label) VALUES(?,?,?,?,?,?,?)`,
+		pk.ID, pk.UserID, pk.PublicKey, pk.SignCount, pk.Credential, s.now(), label)
+	return err
+}
+
+// ListPasskeys lists a user's passkeys, oldest first.
+func (s *Store) ListPasskeys(ctx context.Context, userID string) ([]PasskeyInfo, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, label, created_at, last_used_at FROM passkeys WHERE user_id=? ORDER BY created_at, rowid`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []PasskeyInfo{}
+	for rows.Next() {
+		var p PasskeyInfo
+		var last sql.NullTime
+		if err := rows.Scan(&p.ID, &p.Label, &p.CreatedAt, &last); err != nil {
+			return nil, err
+		}
+		if last.Valid {
+			p.LastUsedAt = &last.Time
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// DeletePasskey deletes one of the user's passkeys. ErrNotFound if the user has
+// no such passkey, ErrLastPasskey if it is the only one.
+func (s *Store) DeletePasskey(ctx context.Context, userID, passkeyID string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var n int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM passkeys WHERE user_id=?`, userID).Scan(&n); err != nil {
+		return err
+	}
+	res, err := tx.ExecContext(ctx, `DELETE FROM passkeys WHERE id=? AND user_id=?`, passkeyID, userID)
+	if err != nil {
+		return err
+	}
+	if err := mustAffectOne(res); err != nil {
+		return err
+	}
+	if n <= 1 {
+		return ErrLastPasskey // rolled back
+	}
+	return tx.Commit()
+}
+
+// RenameUser changes a user's display name.
+func (s *Store) RenameUser(ctx context.Context, userID, name string) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE users SET display_name=? WHERE id=?`, name, userID)
+	if err != nil {
+		return err
+	}
+	return mustAffectOne(res)
 }
