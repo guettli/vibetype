@@ -12,7 +12,9 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+	"unicode/utf8"
 
+	"github.com/guettli/vibetype/internal/lessons"
 	"github.com/guettli/vibetype/internal/store"
 	"github.com/guettli/vibetype/web"
 )
@@ -238,8 +240,15 @@ func TestHardening(t *testing.T) {
 		}
 		return e.do(tok, "PUT", "/api/sessions/"+id, b, nil)
 	}
-	if c := put(store.NewID(), map[string]any{"cpm": 99999}); c != 400 {
-		t.Errorf("absurd cpm: %d", c)
+	if c := put("session-absurd", map[string]any{"cpm": 99999}); c != 200 {
+		t.Errorf("absurd cpm must be clamped, not rejected: %d", c)
+	}
+	var clamped struct{ Results []store.Result }
+	if e.do(tok, "GET", "/api/me/results", nil, &clamped); len(clamped.Results) != 1 || clamped.Results[0].CPM != maxCPM {
+		t.Errorf("clamped cpm: %+v", clamped.Results)
+	}
+	if c := put(store.NewID(), map[string]any{"cpm": -1}); c != 400 {
+		t.Errorf("negative cpm: %d", c)
 	}
 	if c := put(store.NewID(), map[string]any{"started_at": time.Now().Add(time.Hour)}); c != 400 {
 		t.Errorf("future start: %d", c)
@@ -247,13 +256,17 @@ func TestHardening(t *testing.T) {
 	if c := put(store.NewID(), map[string]any{"cursor_pos": 3, "finished_at": start.Add(-time.Hour)}); c != 400 {
 		t.Errorf("finished before start: %d", c)
 	}
-	for i := range maxSessionsPerText {
+	for i := range maxSessionsPerText - 1 { // one already created above
 		if c := put(fmt.Sprintf("session-%03d", i), nil); c != 200 {
 			t.Fatalf("session %d: %d", i, c)
 		}
 	}
-	if c := put("session-too-many", nil); c != 429 {
-		t.Errorf("session limit: %d", c)
+	if c := put("session-one-more", nil); c != 200 {
+		t.Errorf("session beyond the limit must prune, not fail: %d", c)
+	}
+	var all struct{ Results []store.Result }
+	if e.do(tok, "GET", "/api/me/results", nil, &all); len(all.Results) != maxSessionsPerText {
+		t.Errorf("sessions after pruning: %d", len(all.Results))
 	}
 }
 
@@ -275,7 +288,7 @@ func TestResultsAndDelete(t *testing.T) {
 	}
 	var res struct {
 		Results []store.Result `json:"results"`
-		BestIDs []string       `json:"best_ids"`
+		Best    []store.Best   `json:"best"`
 	}
 	if c := e.do(bTok, "GET", "/api/me/results", nil, &res); c != 200 || len(res.Results) != 3 {
 		t.Fatalf("results: %d %+v", c, res)
@@ -286,8 +299,8 @@ func TestResultsAndDelete(t *testing.T) {
 	if r := res.Results[1]; r.TextTitle != "Zwei" || r.TextLength != 5 || r.FinishedAt != nil {
 		t.Fatalf("utf-8 length / unfinished: %+v", r)
 	}
-	if len(res.BestIDs) != 1 || res.BestIDs[0] != "session-2" { // finished on t1 with the higher cpm
-		t.Fatalf("best ids: %v", res.BestIDs)
+	if len(res.Best) != 1 || res.Best[0].ID != "session-2" || res.Best[0].TextID != t1.ID || res.Best[0].CPM != 102 { // finished on t1 with the higher cpm
+		t.Fatalf("best: %+v", res.Best)
 	}
 	if c := e.do(bTok, "GET", "/api/me/results?text_id="+t1.ID, nil, &res); c != 200 || len(res.Results) != 2 {
 		t.Fatalf("filtered: %d %d", c, len(res.Results))
@@ -310,5 +323,70 @@ func TestResultsAndDelete(t *testing.T) {
 	}
 	if c := e.do(bTok, "PUT", "/api/sessions/session-0", map[string]any{"text_id": t1.ID, "cursor_pos": 1, "error_count": 0, "cpm": 1, "started_at": start}, nil); c != 404 {
 		t.Fatalf("sync to deleted text: %d", c)
+	}
+}
+
+func TestLessons(t *testing.T) {
+	e := newEnv(t)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	if err := SeedLessons(context.Background(), e.st, logger); err != nil {
+		t.Fatal(err)
+	}
+	if err := SeedLessons(context.Background(), e.st, logger); err != nil { // idempotent
+		t.Fatalf("second seed: %v", err)
+	}
+	_, tok := e.login("Lena")
+	var ls []struct {
+		ID, Title string
+		Length    int
+	}
+	if c := e.do(tok, "GET", "/api/lessons", nil, &ls); c != 200 || len(ls) != len(lessons.All) || ls[0].ID != "lek01" || ls[0].Length == 0 {
+		t.Fatalf("lessons: %d %+v", c, ls)
+	}
+	var txt store.Text
+	if c := e.do(tok, "GET", "/api/texts/lek01", nil, &txt); c != 200 || txt.CreatorName != lessons.SystemUserName {
+		t.Fatalf("lesson text: %d %+v", c, txt)
+	}
+	var withNext struct {
+		NextLesson string `json:"next_lesson"`
+	}
+	if e.do(tok, "GET", "/api/texts/lek01", nil, &withNext); withNext.NextLesson != "lek02" {
+		t.Fatalf("next lesson: %+v", withNext)
+	}
+	withNext.NextLesson = ""
+	if e.do(tok, "GET", "/api/texts/lek13", nil, &withNext); withNext.NextLesson != "" {
+		t.Fatalf("last lesson has no next: %+v", withNext)
+	}
+	if c := e.do(tok, "DELETE", "/api/texts/lek01", nil, nil); c != 403 {
+		t.Fatalf("users must not delete lessons: %d", c)
+	}
+	// changed lesson content resets its sessions; removed lessons disappear
+	n := utf8.RuneCountInString(txt.Content)
+	if c := e.do(tok, "PUT", "/api/sessions/session-lesson", map[string]any{"text_id": "lek01", "cursor_pos": n, "error_count": 0, "cpm": 100,
+		"started_at": time.Now().Add(-time.Minute)}, nil); c != 200 {
+		t.Fatalf("sync: %d", c)
+	}
+	if deleted, err := e.st.SeedTexts(context.Background(), lessons.SystemUserID, lessons.SystemUserName, []store.SeedText{{ID: "lek01", Title: "x", Content: "asdf"}}); err != nil || deleted != 1 {
+		t.Fatalf("reseed: %d %v", deleted, err)
+	}
+	var res struct{ Results []store.Result }
+	if c := e.do(tok, "GET", "/api/me/results?text_id=lek01", nil, &res); c != 200 || len(res.Results) != 0 {
+		t.Fatalf("sessions of changed lesson: %d %+v", c, res.Results)
+	}
+	if c := e.do(tok, "GET", "/api/texts/lek02", nil, nil); c != 404 {
+		t.Fatalf("lesson removed from the course must be gone: %d", c)
+	}
+	// a user text can never be overwritten by the seeder
+	var mine store.Text
+	e.do(tok, "POST", "/api/texts", map[string]string{"title": "t", "content": "abc"}, &mine)
+	if _, err := e.st.SeedTexts(context.Background(), lessons.SystemUserID, lessons.SystemUserName, []store.SeedText{{ID: mine.ID, Title: "x", Content: "y"}}); err == nil {
+		t.Fatal("seeding over a user text must fail")
+	}
+}
+
+func TestReservedName(t *testing.T) {
+	e := newEnv(t)
+	if c := e.do("", "POST", "/api/register/begin", map[string]string{"display_name": " VibeType "}, nil); c != 400 {
+		t.Fatalf("reserved name: %d", c)
 	}
 }

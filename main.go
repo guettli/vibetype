@@ -48,6 +48,10 @@ func run() error {
 	}
 	defer st.Close()
 
+	if err := server.SeedLessons(context.Background(), st, logger); err != nil {
+		return fmt.Errorf("seed lessons: %w", err)
+	}
+
 	srv, err := server.New(server.Config{
 		Version: version, RPID: u.Hostname(), Origin: *origin, Static: web.Static(), Logger: logger, Store: st,
 	})

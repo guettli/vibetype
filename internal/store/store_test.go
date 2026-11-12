@@ -61,13 +61,31 @@ func TestSessionLimitAndExpiry(t *testing.T) {
 		t.Fatal(err)
 	}
 	txt, _ := st.CreateText(ctx, u.ID, "t", "abc")
-	for i := range 3 {
-		if _, err := st.UpsertTypingSession(ctx, TypingSession{ID: fmt.Sprint("s", i), TextID: txt.ID, UserID: u.ID, StartedAt: time.Now()}, 2); i < 2 && err != nil || i == 2 && !errors.Is(err, ErrLimit) {
+	// s0 is the best finished run; s1..s4 are newer, unfinished ones. With a
+	// limit of 3, the oldest runs are pruned but the best one survives.
+	t0 := time.Now().Add(-time.Hour)
+	fin := t0.Add(time.Minute)
+	if _, err := st.UpsertTypingSession(ctx, TypingSession{ID: "s0", TextID: txt.ID, UserID: u.ID, CursorPos: 3, CPM: 500, StartedAt: t0, FinishedAt: &fin}, 3); err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i <= 4; i++ {
+		if _, err := st.UpsertTypingSession(ctx, TypingSession{ID: fmt.Sprint("s", i), TextID: txt.ID, UserID: u.ID, StartedAt: t0.Add(time.Duration(i) * time.Minute)}, 3); err != nil {
 			t.Fatalf("session %d: %v", i, err)
 		}
 	}
-	// updating an existing session is always allowed
-	if _, err := st.UpsertTypingSession(ctx, TypingSession{ID: "s0", TextID: txt.ID, UserID: u.ID, CursorPos: 1, StartedAt: time.Now()}, 2); err != nil {
+	res, err := st.ResultsForUser(ctx, u.ID, txt.ID, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for _, r := range res {
+		ids = append(ids, r.ID)
+	}
+	if fmt.Sprint(ids) != "[s4 s3 s0]" {
+		t.Fatalf("after pruning: %v", ids)
+	}
+	// updating an existing session never prunes
+	if _, err := st.UpsertTypingSession(ctx, TypingSession{ID: "s3", TextID: txt.ID, UserID: u.ID, CursorPos: 1, StartedAt: time.Now()}, 3); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := st.CreateAuthSession(ctx, u.ID, -time.Second); err != nil {

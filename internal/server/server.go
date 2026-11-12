@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/go-webauthn/webauthn/webauthn"
 
+	"github.com/guettli/vibetype/internal/lessons"
 	"github.com/guettli/vibetype/internal/store"
 	"github.com/guettli/vibetype/internal/textnorm"
 )
@@ -117,6 +119,7 @@ func (s *Server) routes() {
 	m.HandleFunc("GET /api/texts/{id}/sessions", s.auth(s.liveSessions))
 	m.HandleFunc("DELETE /api/texts/{id}", s.auth(s.deleteText))
 	m.HandleFunc("GET /api/me/results", s.auth(s.myResults))
+	m.HandleFunc("GET /api/lessons", s.auth(s.listLessons))
 	m.HandleFunc("PUT /api/sessions/{id}", s.auth(s.syncSession))
 
 	static := http.FileServerFS(s.cfg.Static)
@@ -264,7 +267,11 @@ func (s *Server) getText(w http.ResponseWriter, r *http.Request) {
 		s.internal(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, t)
+	type textWithNext struct {
+		store.Text
+		NextLesson string `json:"next_lesson,omitempty"`
+	}
+	writeJSON(w, http.StatusOK, textWithNext{Text: t, NextLesson: lessons.Next(t.ID)})
 }
 
 // liveSessions returns all typing sessions of a text. Only the creator of the
@@ -324,8 +331,8 @@ func (s *Server) syncSession(w http.ResponseWriter, r *http.Request) {
 	case in.CursorPos < 0 || in.CursorPos > n || in.ErrorCount < 0:
 		httpError(w, http.StatusBadRequest, "invalid progress values")
 		return
-	case in.CPM < 0 || in.CPM > maxCPM:
-		httpError(w, http.StatusBadRequest, fmt.Sprintf("cpm must be between 0 and %d", maxCPM))
+	case in.CPM < 0:
+		httpError(w, http.StatusBadRequest, "cpm must not be negative")
 		return
 	case in.StartedAt.IsZero() || in.StartedAt.After(now.Add(time.Minute)):
 		httpError(w, http.StatusBadRequest, "started_at missing or in the future")
@@ -337,6 +344,12 @@ func (s *Server) syncSession(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "finished_at before started_at or in the future")
 		return
 	}
+	if in.CPM > maxCPM {
+		// Not humanly possible (pasted keystrokes, broken clock, cheating). Clamp
+		// instead of rejecting so the progress itself is not lost; log it.
+		s.cfg.Logger.Warn("implausible cpm clamped", "session", id, "user", userFrom(r.Context()).ID, "cpm", in.CPM, "max", maxCPM)
+		in.CPM = maxCPM
+	}
 	ts, err := s.cfg.Store.UpsertTypingSession(r.Context(), store.TypingSession{
 		ID: id, TextID: t.ID, UserID: userFrom(r.Context()).ID,
 		CursorPos: in.CursorPos, ErrorCount: in.ErrorCount, CPM: in.CPM,
@@ -344,10 +357,6 @@ func (s *Server) syncSession(w http.ResponseWriter, r *http.Request) {
 	}, maxSessionsPerText)
 	if errors.Is(err, store.ErrNotFound) { // deleted concurrently
 		httpError(w, http.StatusNotFound, "text not found")
-		return
-	}
-	if errors.Is(err, store.ErrLimit) {
-		httpError(w, http.StatusTooManyRequests, fmt.Sprintf("more than %d typing sessions on this text", maxSessionsPerText))
 		return
 	}
 	if errors.Is(err, store.ErrForbidden) {
@@ -413,10 +422,43 @@ func (s *Server) myResults(w http.ResponseWriter, r *http.Request) {
 		s.internal(w, r, err)
 		return
 	}
-	best, err := s.cfg.Store.BestResultIDs(r.Context(), uid)
+	best, err := s.cfg.Store.BestResults(r.Context(), uid)
 	if err != nil {
 		s.internal(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"results": results, "best_ids": best, "limit": maxResults})
+	writeJSON(w, http.StatusOK, map[string]any{"results": results, "best": best, "limit": maxResults})
+}
+
+// listLessons returns the built-in lessons in course order (without content).
+func (s *Server) listLessons(w http.ResponseWriter, r *http.Request) {
+	texts, err := s.cfg.Store.TextsByCreator(r.Context(), lessons.SystemUserID)
+	if err != nil {
+		s.internal(w, r, err)
+		return
+	}
+	type lesson struct {
+		ID     string `json:"id"`
+		Title  string `json:"title"`
+		Length int    `json:"length"`
+	}
+	out := make([]lesson, 0, len(texts))
+	for _, t := range texts {
+		out = append(out, lesson{ID: t.ID, Title: t.Title, Length: utf8.RuneCountInString(t.Content)})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	writeJSON(w, http.StatusOK, out)
+}
+
+// SeedLessons stores the built-in lessons (idempotent, run at startup).
+func SeedLessons(ctx context.Context, st *store.Store, logger *slog.Logger) error {
+	seed := make([]store.SeedText, 0, len(lessons.All))
+	for _, l := range lessons.All {
+		seed = append(seed, store.SeedText{ID: l.ID, Title: l.Title, Content: l.Content})
+	}
+	deleted, err := st.SeedTexts(ctx, lessons.SystemUserID, lessons.SystemUserName, seed)
+	if deleted > 0 {
+		logger.Warn("lessons changed: deleted typing sessions that referred to the old content", "sessions", deleted)
+	}
+	return err
 }
