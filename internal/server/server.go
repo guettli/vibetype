@@ -114,6 +114,8 @@ func (s *Server) routes() {
 	m.HandleFunc("POST /api/texts", s.auth(s.createText))
 	m.HandleFunc("GET /api/texts/{id}", s.auth(s.getText))
 	m.HandleFunc("GET /api/texts/{id}/sessions", s.auth(s.liveSessions))
+	m.HandleFunc("DELETE /api/texts/{id}", s.auth(s.deleteText))
+	m.HandleFunc("GET /api/me/results", s.auth(s.myResults))
 	m.HandleFunc("PUT /api/sessions/{id}", s.auth(s.syncSession))
 
 	static := http.FileServerFS(s.cfg.Static)
@@ -381,4 +383,29 @@ func (s *Server) RunJanitor(ctx context.Context, every time.Duration) {
 		case <-t.C:
 		}
 	}
+}
+
+// deleteText removes one of the caller's texts including all typing sessions on it.
+func (s *Server) deleteText(w http.ResponseWriter, r *http.Request) {
+	err := s.cfg.Store.DeleteText(r.Context(), r.PathValue("id"), userFrom(r.Context()).ID)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		httpError(w, http.StatusNotFound, "text not found")
+	case errors.Is(err, store.ErrForbidden):
+		httpError(w, http.StatusForbidden, "only the creator can delete a text")
+	case err != nil:
+		s.internal(w, r, err)
+	default:
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+// myResults lists the caller's typing sessions (newest first), optionally for one text.
+func (s *Server) myResults(w http.ResponseWriter, r *http.Request) {
+	results, err := s.cfg.Store.ResultsForUser(r.Context(), userFrom(r.Context()).ID, r.URL.Query().Get("text_id"), 200)
+	if err != nil {
+		s.internal(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"results": results})
 }

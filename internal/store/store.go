@@ -391,3 +391,73 @@ func mustAffectOne(res sql.Result) error {
 	}
 	return nil
 }
+
+// Result is a typing session of one user together with its text's title and length.
+type Result struct {
+	TypingSession
+	TextTitle  string `json:"text_title"`
+	TextLength int    `json:"text_length"` // in characters (runes)
+}
+
+// ResultsForUser lists a user's typing sessions, newest first. textID filters
+// to one text if not empty.
+func (s *Store) ResultsForUser(ctx context.Context, userID, textID string, limit int) ([]Result, error) {
+	q := `SELECT s.id, s.text_id, s.user_id, u.display_name, s.cursor_pos, s.error_count, s.cpm,
+			s.started_at, s.updated_at, s.finished_at, t.title, length(t.content)
+		FROM typing_sessions s JOIN users u ON u.id=s.user_id JOIN texts t ON t.id=s.text_id
+		WHERE s.user_id=?`
+	args := []any{userID}
+	if textID != "" {
+		q += ` AND s.text_id=?`
+		args = append(args, textID)
+	}
+	q += ` ORDER BY s.started_at DESC LIMIT ?`
+	args = append(args, limit)
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Result{}
+	for rows.Next() {
+		var r Result
+		var fin sql.NullTime
+		if err := rows.Scan(&r.ID, &r.TextID, &r.UserID, &r.UserName, &r.CursorPos, &r.ErrorCount, &r.CPM,
+			&r.StartedAt, &r.UpdatedAt, &fin, &r.TextTitle, &r.TextLength); err != nil {
+			return nil, err
+		}
+		if fin.Valid {
+			r.FinishedAt = &fin.Time
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// DeleteText deletes a text and all typing sessions on it. Only the creator may
+// delete: ErrNotFound if the text does not exist, ErrForbidden if it is someone else's.
+func (s *Store) DeleteText(ctx context.Context, textID, userID string) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var creator string
+	err = tx.QueryRowContext(ctx, `SELECT creator_id FROM texts WHERE id=?`, textID).Scan(&creator)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	if creator != userID {
+		return ErrForbidden
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM typing_sessions WHERE text_id=?`, textID); err != nil {
+		return fmt.Errorf("delete typing sessions: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM texts WHERE id=?`, textID); err != nil {
+		return fmt.Errorf("delete text: %w", err)
+	}
+	return tx.Commit()
+}

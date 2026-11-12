@@ -17,6 +17,11 @@ jeder Nutzer kann Texte anlegen, per Link/Code teilen und sieht live, wer seinen
   Großschreibung folgt der 10-Finger-Regel: Shift drückt der kleine Finger der jeweils anderen Hand. Bei QWERTZ werden
   Tottasten in zwei Schritten erklärt: `^` allein ist „^, dann Leertaste“, `é` ist „´, dann e“. Zeichen, die auf dem
   Layout fehlen (z. B. ñ), zeigen „Taste nicht auf diesem Layout“.
+* **Eigene Ergebnisse:** Die Startseite listet alle eigenen Tipp-Durchgänge (Datum, Text, Anschläge/min, Fehler,
+  Genauigkeit, Zeit). Die Bestleistung pro Text ist mit ★ markiert. Nach dem Abschluss eines Texts zeigt eine
+  Zusammenfassung das Ergebnis und vergleicht es mit der bisherigen Bestleistung.
+* **Texte löschen:** Der Ersteller kann einen Text löschen. Dabei werden auch alle Tipp-Sitzungen aller Personen auf
+  diesem Text gelöscht (mit Rückfrage).
 * **Passkeys:** Login per WebAuthn (discoverable credentials), ohne Passwort und ohne E-Mail. Sitzung per HTTP-only-Cookie.
 
 ## Stack
@@ -138,4 +143,6 @@ letzten 60 s.
 | GET/POST | `/api/texts` | eigene Texte / neuen Text anlegen |
 | GET | `/api/texts/{id}` | jeder angemeldete Nutzer (Teilen per Link) |
 | GET | `/api/texts/{id}/sessions` | Live-Ansicht, nur für den Ersteller |
+| DELETE | `/api/texts/{id}` | nur der Ersteller; löscht auch alle Sitzungen auf dem Text |
+| GET | `/api/me/results[?text_id=…]` | eigene Sitzungen mit Texttitel und -länge, neueste zuerst (max. 200) |
 | PUT | `/api/sessions/{id}` | Sync |

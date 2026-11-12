@@ -88,6 +88,14 @@ await A.page.waitForSelector('tr:has-text("Bob"):has-text("fertig")', { timeout:
 step('after reconnect Alice sees: ' + (await A.page.$eval('tbody tr', (el) => el.innerText)).replace(/\s+/g, ' '));
 for (const p of [A.page, B.page]) if (/\bnull\b/.test(await p.innerText('body'))) throw new Error('stray null in DOM');
 
+// finish summary + results on the home page
+if (!(await B.page.textContent('.summary')).includes('Fertig!')) throw new Error('no finish summary');
+await B.page.click('a.logo');
+await B.page.waitForSelector('table.results');
+const resultRow = await B.page.$eval('table.results tbody tr', (el) => el.innerText.replace(/\s+/g, ' '));
+if (!resultRow.includes('★') || !resultRow.includes('fertig')) throw new Error('results row: ' + resultRow);
+step('home shows result: ' + resultRow);
+
 // logout wipes the user's offline data (shared classroom PCs)
 await B.page.click('text=abmelden');
 await B.page.waitForSelector('text=Mit Passkey anmelden');
@@ -102,6 +110,13 @@ await A.page.fill('textarea', 'Hallo 😀');
 await A.page.click('text=Speichern & teilen');
 await A.page.waitForSelector('#status:has-text("cannot be typed")');
 step('emoji text rejected: ' + await A.page.$eval('#status', (e) => e.innerText));
+
+// creator deletes the text (with all results)
+A.page.once('dialog', (d) => d.accept());
+await A.page.goto(BASE + '/');
+await A.page.click(`li:has(code:text("${slug}")) >> text=löschen`);
+await A.page.waitForSelector('text=Noch keine Texte.');
+step('creator deleted the text');
 
 const relevant = errors.filter((e) => !e.includes('net::ERR_INTERNET_DISCONNECTED') && !e.includes('Failed to fetch') && !e.includes('401 (Unauthorized)') && !e.includes('400 (Bad Request)') /* /api/me before login */);
 console.log('console errors:', relevant.length ? relevant : 'none', `(${errors.length - relevant.length} expected offline fetch errors)`);

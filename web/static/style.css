@@ -95,3 +95,14 @@ tr.active td:last-child { color: var(--ok); }
 .key.wrong { animation: key-wrong 0.4s ease; }
 @keyframes key-wrong { 0%, 60% { background: var(--bad); color: #fff; } }
 @media (max-width: 600px) { .key { height: 30px; font-size: 12px; } .key .sub, .key .alt { font-size: 8px; } }
+
+/* results */
+button.link.danger { color: var(--bad); font-size: 14px; margin-left: 8px; }
+.best { color: var(--warn); }
+.good { color: var(--ok); font-weight: 600; }
+table.results { font-size: 14px; }
+table.results th.num { text-align: right; }
+.summary { margin-top: 16px; padding: 12px 16px; border-radius: 8px; background: var(--bg); border-left: 4px solid var(--ok); }
+.summary h3 { margin: 0 0 4px; }
+.summary p { margin: 4px 0; }
+@media (max-width: 600px) { table.results th:nth-child(7), table.results td:nth-child(7), table.results th:nth-child(5), table.results td:nth-child(5) { display: none; } }
