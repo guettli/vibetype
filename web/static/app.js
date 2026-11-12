@@ -698,9 +698,7 @@ async function typingView(textId) {
       );
     };
     fill($live,
-      h('div', { class: 'live-head' },
-        h('h2', {}, 'Live-Ansicht ', h('span', { class: 'muted' }, `(${sessions.length})`)),
-        h('button', { onclick: togglePresent }, document.fullscreenElement ? 'Präsentation beenden' : 'Präsentieren')),
+      h('h2', {}, 'Live-Ansicht ', h('span', { class: 'muted' }, `(${sessions.length})`)),
       sessions.length === 0 ? h('p', { class: 'muted' }, 'Noch tippt niemand diesen Text.') :
         h('table', {},
           h('thead', {}, h('tr', {}, h('th', {}, 'Name'), h('th', {}, 'Fortschritt'), h('th', {}, 'Anschl./min'), h('th', {}, 'Fehler'), h('th', {}, 'Status'))),
@@ -710,22 +708,36 @@ async function typingView(textId) {
     for (const el of $live.querySelectorAll('.fill')) el.style.width = el.dataset.pct + '%';
   }
   // Classroom: the creator shows the share link as code + QR code on the projector.
-  const $share = h('div', { class: 'share' },
-    h('img', { src: `/api/texts/${encodeURIComponent(text.id)}/qr.svg`, alt: `QR-Code für ${shareUrl}`, class: 'qr' }),
-    h('div', {},
-      h('div', { class: 'share-title' }, text.title),
-      h('div', {}, 'Code ', h('code', { class: 'big-code' }, text.id)),
-      h('div', { class: 'muted share-url' }, shareUrl)));
-  const $liveCard = h('section', { class: 'card live-card' }, $share, $live);
+  // Built only for the creator (an <img> fetches its src even when never shown).
+  // The present button lives here, not in $live, which is redrawn on every poll.
+  let $liveCard = null;
+  let $present = null;
+  const presenting = () => $liveCard?.classList.contains('present');
+  function setPresenting(on) {
+    $liveCard.classList.toggle('present', on);
+    $present.textContent = on ? 'Präsentation beenden' : 'Präsentieren';
+    $present.setAttribute('aria-pressed', String(on));
+  }
   async function togglePresent() {
+    // Without the Fullscreen API (iPhone) the card just covers the viewport.
+    if (!document.fullscreenEnabled) { setPresenting(!presenting()); return; }
     try {
       if (document.fullscreenElement) await document.exitFullscreen();
       else await $liveCard.requestFullscreen();
     } catch (err) { fail(`Vollbild nicht möglich: ${err.message}`); }
   }
-  function onFullscreenChange() {
-    $liveCard.classList.toggle('present', document.fullscreenElement === $liveCard);
-    pollLive(); // re-render the button label
+  function onFullscreenChange() { setPresenting(document.fullscreenElement === $liveCard); }
+  if (isCreator) {
+    $present = h('button', { onclick: togglePresent, 'aria-pressed': 'false' }, 'Präsentieren');
+    $liveCard = h('section', { class: 'card live-card' },
+      h('div', { class: 'share' },
+        h('img', { src: `/api/texts/${encodeURIComponent(text.id)}/qr.svg`, alt: `QR-Code für ${shareUrl}`, class: 'qr' }),
+        h('div', { class: 'share-info' },
+          h('div', { class: 'share-title' }, text.title),
+          h('div', {}, 'Code ', h('code', { class: 'big-code' }, text.id)),
+          h('div', { class: 'muted share-url' }, shareUrl)),
+        $present),
+      $live);
   }
   if (isCreator) {
     document.addEventListener('fullscreenchange', onFullscreenChange);
@@ -751,7 +763,7 @@ async function typingView(textId) {
       $summary,
       kb.el,
     ),
-    ...(isCreator ? [$liveCard] : []),
+    $liveCard,
   );
   render();
   $typing.focus();

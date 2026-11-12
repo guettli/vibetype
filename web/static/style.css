@@ -125,8 +125,9 @@ table.weak td { border-bottom: 0; padding: 4px 8px; }
 .share-title { font-weight: 600; }
 .big-code { font-size: 18px; }
 .share-url { font-size: 13px; overflow-wrap: anywhere; }
-.live-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
-.live-card.present { margin: 0; border: 0; border-radius: 0; padding: 32px 48px; overflow: auto; background: var(--card); }
+.share-info { flex: 1; min-width: 0; }
+.live-card.present { margin: 0; border: 0; border-radius: 0; padding: 32px 48px; overflow: auto; background: var(--card);
+  position: fixed; inset: 0; z-index: 10; } /* fixed: fallback where the Fullscreen API is missing (iPhone) */
 .live-card.present .share { gap: 48px; margin-bottom: 32px; }
 .live-card.present .qr { width: min(30vh, 320px); height: min(30vh, 320px); }
 .live-card.present .share-title { font-size: 40px; }
@@ -134,3 +135,13 @@ table.weak td { border-bottom: 0; padding: 4px 8px; }
 .live-card.present .share-url { font-size: 24px; }
 .live-card.present table { font-size: 24px; }
 .live-card.present .bar { width: 240px; height: 14px; }
+@media (max-width: 600px) {
+  .share { flex-wrap: wrap; }
+  .live-card.present { padding: 16px; }
+  .live-card.present .share { gap: 16px; }
+  .live-card.present .share-title { font-size: 24px; }
+  .live-card.present .big-code { font-size: 36px; }
+  .live-card.present .share-url { font-size: 14px; }
+  .live-card.present table { font-size: 16px; }
+  .live-card.present .bar { width: 80px; }
+}

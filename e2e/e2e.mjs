@@ -77,7 +77,7 @@ await A.page.goto(`${BASE}/t/${slug}`);
 const B = await newUser('Bob'); step('Bob registered');
 await B.page.goto(`${BASE}/t/${slug}`);
 await B.page.waitForSelector('.typing');
-if (await B.page.$('.live')) throw new Error('Bob must not see live view');
+if (await B.page.$('.live') || await B.page.$('img.qr')) throw new Error('Bob must not see live view or load the QR code');
 // on-screen keyboard: "H" = right index finger + LEFT shift (other hand)
 await B.page.evaluate(() => localStorage.setItem('vt:prefs', JSON.stringify({ keyboard: true, layout: 'de' })));
 await B.page.reload();

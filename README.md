@@ -20,7 +20,9 @@ jeder Nutzer kann Texte anlegen, per Link/Code teilen und sieht live, wer seinen
 * **Klassenraum-Modus:** Der Ersteller eines Texts sieht über der Live-Ansicht einen QR-Code mit dem Teilen-Link,
   dazu den Code und die URL. „Präsentieren“ schaltet diese Karte in Vollbild mit großer Schrift für den Beamer. Die
   Schüler scannen den QR-Code oder tippen den Code ein. Die Live-Ansicht ist nach Fortschritt sortiert, bei Gleichstand
-  nach Anschlägen/min. Den QR-Code erzeugt der Server als SVG (`rsc.io/qr`), er bleibt bei jeder Größe scharf.
+  nach Anschlägen/min. Den QR-Code erzeugt der Server als SVG (`rsc.io/qr`), er bleibt bei jeder Größe scharf. Er enthält immer den konfigurierten `-origin`, also den
+  Host, an den die Passkeys gebunden sind, auch wenn die Seite über einen anderen Hostnamen geöffnet wurde. Ohne
+  Fullscreen-API (iPhone) überdeckt die Karte einfach das Fenster.
 * **Lektionen:** Ein eingebauter Kurs mit 13 Lektionen für die deutsche QWERTZ-Tastatur. Er beginnt mit der
   Grundreihe (asdf jklö) und führt dann Lektion für Lektion neue Tasten ein: obere und untere Reihe, Großbuchstaben,
   Zahlen, Satz- und Sonderzeichen. Jede Lektion nutzt nur Tasten, die vorher schon eingeführt wurden. Das prüft
