@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 	"unicode/utf8"
@@ -388,5 +389,55 @@ func TestReservedName(t *testing.T) {
 	e := newEnv(t)
 	if c := e.do("", "POST", "/api/register/begin", map[string]string{"display_name": " VibeType "}, nil); c != 400 {
 		t.Fatalf("reserved name: %d", c)
+	}
+}
+
+func TestWeakKeysAndPractice(t *testing.T) {
+	e := newEnv(t)
+	_, tok := e.login("Wanda")
+	var txt store.Text
+	content := "öl öl öl öl öl öl öl öl öl öl asdf asdf asdf"
+	if c := e.do(tok, "POST", "/api/texts", map[string]string{"title": "t", "content": content}, &txt); c != 201 {
+		t.Fatalf("create: %d", c)
+	}
+	n := utf8.RuneCountInString(content)
+	start := time.Now().Add(-time.Minute)
+	put := func(ke map[string]int, errs int) int {
+		return e.do(tok, "PUT", "/api/sessions/session-weak", map[string]any{"text_id": txt.ID, "cursor_pos": n, "error_count": errs,
+			"cpm": 100, "started_at": start, "key_errors": ke}, nil)
+	}
+	for _, tc := range []struct {
+		ke   map[string]int
+		errs int
+	}{{map[string]int{"x": 1}, 1}, {map[string]int{"öl": 1}, 1}, {map[string]int{"ö": 0}, 1}, {map[string]int{"ö": 5}, 4}} {
+		if c := put(tc.ke, tc.errs); c != 400 {
+			t.Errorf("key_errors %v / %d: want 400, got %d", tc.ke, tc.errs, c)
+		}
+	}
+	var conflict struct{ Error string }
+	if c := e.do(tok, "POST", "/api/me/practice", nil, &conflict); c != 409 {
+		t.Fatalf("practice without data: %d", c)
+	}
+	if c := put(map[string]int{"ö": 5, "a": 1}, 6); c != 200 {
+		t.Fatalf("sync: %d", c)
+	}
+	var wk struct {
+		Keys []store.KeyStat `json:"keys"`
+	}
+	if c := e.do(tok, "GET", "/api/me/weak-keys", nil, &wk); c != 200 {
+		t.Fatalf("weak keys: %d", c)
+	}
+	// ö: 10 correct + 5 errors = 15 attempts; a: 3 correct + 1 error = 4 attempts (< 10, not rated)
+	if len(wk.Keys) != 1 || wk.Keys[0].Char != "ö" || wk.Keys[0].Errors != 5 || wk.Keys[0].Attempts != 15 {
+		t.Fatalf("weak keys: %+v", wk.Keys)
+	}
+	var p store.Text
+	if c := e.do(tok, "POST", "/api/me/practice", nil, &p); c != 201 || p.Title != "Übung: ö" || !strings.Contains(p.Content, "ö") {
+		t.Fatalf("practice: %d %+v", c, p)
+	}
+	// an older client without key_errors still syncs
+	if c := e.do(tok, "PUT", "/api/sessions/session-old-client", map[string]any{"text_id": txt.ID, "cursor_pos": 1, "error_count": 0,
+		"cpm": 10, "started_at": start}, nil); c != 200 {
+		t.Fatalf("old client: %d", c)
 	}
 }

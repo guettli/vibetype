@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"math/rand/v2"
 	"net/http"
 	"sort"
 	"strings"
@@ -18,6 +19,7 @@ import (
 	"github.com/go-webauthn/webauthn/webauthn"
 
 	"github.com/guettli/vibetype/internal/lessons"
+	"github.com/guettli/vibetype/internal/practice"
 	"github.com/guettli/vibetype/internal/store"
 	"github.com/guettli/vibetype/internal/textnorm"
 )
@@ -120,6 +122,8 @@ func (s *Server) routes() {
 	m.HandleFunc("DELETE /api/texts/{id}", s.auth(s.deleteText))
 	m.HandleFunc("GET /api/me/results", s.auth(s.myResults))
 	m.HandleFunc("GET /api/lessons", s.auth(s.listLessons))
+	m.HandleFunc("GET /api/me/weak-keys", s.auth(s.weakKeys))
+	m.HandleFunc("POST /api/me/practice", s.auth(s.createPractice))
 	m.HandleFunc("PUT /api/sessions/{id}", s.auth(s.syncSession))
 
 	static := http.FileServerFS(s.cfg.Static)
@@ -301,12 +305,13 @@ func (s *Server) liveSessions(w http.ResponseWriter, r *http.Request) {
 // syncSession is called by the client sync loop every few seconds.
 func (s *Server) syncSession(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		TextID     string     `json:"text_id"`
-		CursorPos  int        `json:"cursor_pos"`
-		ErrorCount int        `json:"error_count"`
-		CPM        int        `json:"cpm"`
-		StartedAt  time.Time  `json:"started_at"`
-		FinishedAt *time.Time `json:"finished_at"`
+		TextID     string         `json:"text_id"`
+		CursorPos  int            `json:"cursor_pos"`
+		ErrorCount int            `json:"error_count"`
+		CPM        int            `json:"cpm"`
+		StartedAt  time.Time      `json:"started_at"`
+		FinishedAt *time.Time     `json:"finished_at"`
+		KeyErrors  map[string]int `json:"key_errors"`
 	}
 	if !readJSON(w, r, &in) {
 		return
@@ -344,6 +349,10 @@ func (s *Server) syncSession(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, "finished_at before started_at or in the future")
 		return
 	}
+	if msg := validKeyErrors(in.KeyErrors, t.Content, in.ErrorCount); msg != "" {
+		httpError(w, http.StatusBadRequest, "invalid key_errors: "+msg)
+		return
+	}
 	if in.CPM > maxCPM {
 		// Not humanly possible (pasted keystrokes, broken clock, cheating). Clamp
 		// instead of rejecting so the progress itself is not lost; log it.
@@ -352,7 +361,7 @@ func (s *Server) syncSession(w http.ResponseWriter, r *http.Request) {
 	}
 	ts, err := s.cfg.Store.UpsertTypingSession(r.Context(), store.TypingSession{
 		ID: id, TextID: t.ID, UserID: userFrom(r.Context()).ID,
-		CursorPos: in.CursorPos, ErrorCount: in.ErrorCount, CPM: in.CPM,
+		CursorPos: in.CursorPos, ErrorCount: in.ErrorCount, CPM: in.CPM, KeyErrors: in.KeyErrors,
 		StartedAt: in.StartedAt.UTC(), FinishedAt: utcPtr(in.FinishedAt),
 	}, maxSessionsPerText)
 	if errors.Is(err, store.ErrNotFound) { // deleted concurrently
@@ -461,4 +470,83 @@ func SeedLessons(ctx context.Context, st *store.Store, logger *slog.Logger) erro
 		logger.Warn("lessons changed: deleted typing sessions that referred to the old content", "sessions", deleted)
 	}
 	return err
+}
+
+// validKeyErrors checks the per-character error counts of a sync request; it
+// returns "" if they are fine. (Older clients send none, which is fine too.)
+func validKeyErrors(ke map[string]int, content string, errorCount int) string {
+	if len(ke) > 200 {
+		return "too many entries"
+	}
+	sum := 0
+	for k, n := range ke {
+		if utf8.RuneCountInString(k) != 1 || !strings.Contains(content, k) {
+			return fmt.Sprintf("%q is not a character of the text", k)
+		}
+		if n < 1 {
+			return fmt.Sprintf("count for %q must be positive", k)
+		}
+		sum += n
+	}
+	if sum > errorCount {
+		return fmt.Sprintf("sum %d exceeds error_count %d", sum, errorCount)
+	}
+	return ""
+}
+
+const (
+	weakKeysWindow      = 30 * 24 * time.Hour
+	weakKeysSessions    = 200
+	weakKeysMinAttempts = 10
+	weakKeysLimit       = 5
+)
+
+func (s *Server) loadWeakKeys(r *http.Request) ([]store.KeyStat, error) {
+	return s.cfg.Store.WeakKeys(r.Context(), userFrom(r.Context()).ID, time.Now().Add(-weakKeysWindow),
+		weakKeysSessions, weakKeysMinAttempts, weakKeysLimit)
+}
+
+// weakKeys returns the caller's characters with the highest error rate.
+func (s *Server) weakKeys(w http.ResponseWriter, r *http.Request) {
+	keys, err := s.loadWeakKeys(r)
+	if err != nil {
+		s.internal(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"keys": keys, "min_attempts": weakKeysMinAttempts, "days": int(weakKeysWindow.Hours() / 24)})
+}
+
+// createPractice creates a personal text that drills the caller's weak keys.
+func (s *Server) createPractice(w http.ResponseWriter, r *http.Request) {
+	keys, err := s.loadWeakKeys(r)
+	if err != nil {
+		s.internal(w, r, err)
+		return
+	}
+	chars := make([]string, 0, len(keys))
+	for _, k := range keys {
+		chars = append(chars, k.Char)
+	}
+	content := textnorm.Normalize(practice.Text(chars, rand.New(rand.NewPCG(uint64(time.Now().UnixNano()), 0))))
+	if content == "" {
+		httpError(w, http.StatusConflict, "not enough typing data yet to find weak keys")
+		return
+	}
+	var shown []string
+	for _, c := range chars {
+		if c == " " {
+			c = "Leertaste"
+		} else if c == "\n" {
+			c = "Enter"
+		}
+		shown = append(shown, c)
+	}
+	u := userFrom(r.Context())
+	t, err := s.cfg.Store.CreateText(r.Context(), u.ID, "Übung: "+strings.Join(shown, " "), content)
+	if err != nil {
+		s.internal(w, r, err)
+		return
+	}
+	t.CreatorName = u.DisplayName
+	writeJSON(w, http.StatusCreated, t)
 }

@@ -2,7 +2,8 @@
 
 // newSession creates the local state of one typing run over `content`.
 export function newSession(id, textId) {
-  return { id, textId, cursor: 0, errors: 0, startedAt: null, finishedAt: null };
+  // keyErrors: expected character -> number of wrong key presses while it was due
+  return { id, textId, cursor: 0, errors: 0, keyErrors: {}, startedAt: null, finishedAt: null };
 }
 
 // chars splits a text into code points (the server counts runes, not UTF-16 units).
@@ -32,6 +33,9 @@ export function press(state, textChars, ch, now) {
     return 'correct';
   }
   state.errors++;
+  state.keyErrors ??= {}; // sessions stored by older versions have no keyErrors
+  const due = textChars[state.cursor];
+  state.keyErrors[due] = (state.keyErrors[due] ?? 0) + 1;
   return 'error';
 }
 
@@ -63,5 +67,6 @@ export function syncPayload(state, now) {
     cpm: cpm(state, now),
     started_at: state.startedAt,
     finished_at: state.finishedAt,
+    key_errors: state.keyErrors ?? {},
   };
 }

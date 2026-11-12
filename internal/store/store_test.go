@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -110,5 +111,35 @@ func TestUpsertOnDeletedText(t *testing.T) {
 	// the handler looked the text up, then it was deleted before the upsert
 	if _, err := st.UpsertTypingSession(ctx, TypingSession{ID: "s", TextID: "gone00", UserID: u.ID, StartedAt: time.Now()}, 0); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("want ErrNotFound, got %v", err)
+	}
+}
+
+// A database created by an older version (no key_errors column) is migrated on Open.
+func TestMigrateAddsKeyErrors(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old.db")
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE typing_sessions (id TEXT PRIMARY KEY, text_id TEXT NOT NULL, user_id TEXT NOT NULL,
+		cursor_pos INTEGER NOT NULL, error_count INTEGER NOT NULL, cpm INTEGER NOT NULL, started_at DATETIME NOT NULL,
+		updated_at DATETIME NOT NULL, finished_at DATETIME);
+		INSERT INTO typing_sessions VALUES('old','t','u',1,0,10,'2026-01-01','2026-01-01',NULL)`); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	st, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	var ke string
+	if err := st.db.QueryRow(`SELECT key_errors FROM typing_sessions WHERE id='old'`).Scan(&ke); err != nil || ke != "{}" {
+		t.Fatalf("migrated row: %q %v", ke, err)
+	}
+	// opening again is a no-op
+	st.Close()
+	if st, err = Open(path); err != nil {
+		t.Fatal(err)
 	}
 }

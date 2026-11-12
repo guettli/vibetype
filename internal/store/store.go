@@ -7,8 +7,10 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"time"
 
 	_ "modernc.org/sqlite" // CGO-free SQLite driver
@@ -52,7 +54,8 @@ CREATE TABLE IF NOT EXISTS typing_sessions (
 	cpm         INTEGER NOT NULL,
 	started_at  DATETIME NOT NULL,
 	updated_at  DATETIME NOT NULL,
-	finished_at DATETIME
+	finished_at DATETIME,
+	key_errors  TEXT NOT NULL DEFAULT '{}' -- JSON: expected character -> wrong key presses
 );
 CREATE INDEX IF NOT EXISTS typing_sessions_text ON typing_sessions(text_id, updated_at);
 CREATE INDEX IF NOT EXISTS typing_sessions_user ON typing_sessions(user_id, started_at);
@@ -85,7 +88,35 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate %s: %w", path, err)
 	}
+	if err := addColumnIfMissing(db, "typing_sessions", "key_errors", `TEXT NOT NULL DEFAULT '{}'`); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate %s: %w", path, err)
+	}
 	return &Store{db: db, now: func() time.Time { return time.Now().UTC() }}, nil
+}
+
+// addColumnIfMissing adds a column to a table created by an older version
+// (CREATE TABLE IF NOT EXISTS does not change existing tables).
+func addColumnIfMissing(db *sql.DB, table, column, decl string) error {
+	rows, err := db.Query(`SELECT name FROM pragma_table_info(?)`, table)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return err
+		}
+		if name == column {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = db.Exec(fmt.Sprintf(`ALTER TABLE %s ADD COLUMN %s %s`, table, column, decl))
+	return err
 }
 
 // Close closes the database.
@@ -302,6 +333,9 @@ type TypingSession struct {
 	StartedAt  time.Time  `json:"started_at"`
 	UpdatedAt  time.Time  `json:"updated_at"`
 	FinishedAt *time.Time `json:"finished_at"`
+	// KeyErrors maps an expected character to the number of wrong key presses
+	// while it was due. Only written by UpsertTypingSession, not read by the lists.
+	KeyErrors map[string]int `json:"key_errors,omitempty"`
 }
 
 // UpsertTypingSession creates or updates a typing session owned by ts.UserID.
@@ -353,15 +387,23 @@ func (s *Store) UpsertTypingSession(ctx context.Context, ts TypingSession, maxPe
 		}
 	}
 	ts.UpdatedAt = s.now()
-	_, err = tx.ExecContext(ctx, `INSERT INTO typing_sessions(id, text_id, user_id, cursor_pos, error_count, cpm, started_at, updated_at, finished_at)
-		VALUES(?,?,?,?,?,?,?,?,?)
+	keyErrors, err := json.Marshal(ts.KeyErrors)
+	if err != nil {
+		return ts, err
+	}
+	if ts.KeyErrors == nil {
+		keyErrors = []byte("{}")
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO typing_sessions(id, text_id, user_id, cursor_pos, error_count, cpm, started_at, updated_at, finished_at, key_errors)
+		VALUES(?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(id) DO UPDATE SET
 			cpm         = CASE WHEN excluded.cursor_pos >= cursor_pos THEN excluded.cpm ELSE cpm END,
+			key_errors  = CASE WHEN excluded.error_count >= error_count THEN excluded.key_errors ELSE key_errors END,
 			cursor_pos  = MAX(cursor_pos, excluded.cursor_pos),
 			error_count = MAX(error_count, excluded.error_count),
 			updated_at  = excluded.updated_at,
 			finished_at = COALESCE(finished_at, excluded.finished_at)`,
-		ts.ID, ts.TextID, ts.UserID, ts.CursorPos, ts.ErrorCount, ts.CPM, ts.StartedAt, ts.UpdatedAt, ts.FinishedAt)
+		ts.ID, ts.TextID, ts.UserID, ts.CursorPos, ts.ErrorCount, ts.CPM, ts.StartedAt, ts.UpdatedAt, ts.FinishedAt, string(keyErrors))
 	if err != nil {
 		return ts, fmt.Errorf("upsert typing session: %w", err)
 	}
@@ -588,4 +630,66 @@ func (s *Store) SeedTexts(ctx context.Context, userID, userName string, texts []
 		}
 	}
 	return deleted, tx.Commit()
+}
+
+// KeyStat is a user's error statistics for one character.
+type KeyStat struct {
+	Char     string  `json:"char"`
+	Errors   int     `json:"errors"`   // wrong key presses while this character was due
+	Attempts int     `json:"attempts"` // correct presses + errors
+	Rate     float64 `json:"rate"`     // Errors / Attempts
+}
+
+// WeakKeys aggregates the key errors of the user's newest sessions (at most
+// `sessions`) started after since. A character is only rated after minAttempts
+// attempts; the result is sorted by error rate, worst first, at most `limit`.
+func (s *Store) WeakKeys(ctx context.Context, userID string, since time.Time, sessions, minAttempts, limit int) ([]KeyStat, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT t.content, s.cursor_pos, s.key_errors
+		FROM typing_sessions s JOIN texts t ON t.id=s.text_id
+		WHERE s.user_id=? AND s.started_at >= ? ORDER BY s.started_at DESC LIMIT ?`, userID, since, sessions)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	correct := map[string]int{}
+	errs := map[string]int{}
+	for rows.Next() {
+		var content, keyErrors string
+		var cursor int
+		if err := rows.Scan(&content, &cursor, &keyErrors); err != nil {
+			return nil, err
+		}
+		var ke map[string]int
+		if err := json.Unmarshal([]byte(keyErrors), &ke); err != nil {
+			return nil, fmt.Errorf("decode key_errors: %w", err)
+		}
+		for k, n := range ke {
+			errs[k] += n
+		}
+		runes := []rune(content)
+		for _, r := range runes[:min(cursor, len(runes))] {
+			correct[string(r)]++
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	out := []KeyStat{}
+	for k, e := range errs {
+		attempts := correct[k] + e
+		if e == 0 || attempts < minAttempts {
+			continue
+		}
+		out = append(out, KeyStat{Char: k, Errors: e, Attempts: attempts, Rate: float64(e) / float64(attempts)})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Rate != out[j].Rate {
+			return out[i].Rate > out[j].Rate
+		}
+		return out[i].Char < out[j].Char
+	})
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
 }

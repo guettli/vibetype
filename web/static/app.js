@@ -387,6 +387,7 @@ async function homeView() {
   const list = h('ul', { class: 'texts' }, h('li', { class: 'muted' }, 'lade …'));
   const results = h('div', {}, h('p', { class: 'muted' }, 'lade …'));
   const lessonList = h('ol', { class: 'lessons' }, h('li', { class: 'muted' }, 'lade …'));
+  const weak = h('div', {}, h('p', { class: 'muted' }, 'lade …'));
   // shared by the lessons list and the results table; sync first so a run finished seconds ago is included
   const resultsReq = flush().then(() => api('GET', '/api/me/results'));
   resultsReq.catch(() => {}); // handled by each consumer
@@ -414,11 +415,13 @@ async function homeView() {
       h('h2', {}, 'Lektionen'),
       h('p', { class: 'muted' }, 'Ein Kurs für die deutsche QWERTZ-Tastatur: jede Lektion führt ein paar neue Tasten ein und nutzt nur Tasten, die du schon kennst.'),
       lessonList),
+    h('section', { class: 'card' }, h('h2', {}, 'Problemtasten'), weak),
     h('section', { class: 'card' }, h('h2', {}, 'Meine Texte'), list),
     h('section', { class: 'card' }, h('h2', {}, 'Meine Ergebnisse'), results),
   );
   loadResults(results, resultsReq);
   loadLessons(lessonList, resultsReq);
+  loadWeakKeys(weak, resultsReq);
 
   try {
     const texts = await api('GET', '/api/texts');
@@ -475,6 +478,47 @@ async function loadLessons($el, resultsReq) {
   fill($el, lessons.map((l) => h('li', { class: best[l.id] ? 'done' : '' },
     h('a', { href: '/t/' + l.id, 'data-link': true }, l.title),
     best[l.id] ? h('span', { class: 'muted' }, ` ✓ ${best[l.id].cpm} Anschläge/min`) : null)));
+}
+
+async function loadWeakKeys($el, synced) {
+  let data;
+  try {
+    await synced.catch(() => {}); // the results request flushed pending progress first
+    data = await api('GET', '/api/me/weak-keys');
+  } catch (err) {
+    fill($el, h('p', { class: isOffline(err) ? 'warn' : 'bad' }, isOffline(err) ? 'offline – Problemtasten nicht verfügbar' : err.message));
+    return;
+  }
+  if (!data.keys.length) {
+    fill($el, h('p', { class: 'muted' }, `Noch keine Problemtasten. Eine Taste wird bewertet, sobald du sie in den letzten ${data.days} Tagen mindestens ${data.min_attempts}-mal tippen solltest und dich dabei mindestens einmal vertippt hast.`));
+    return;
+  }
+  const layout = loadPrefs().layout;
+  const label = (c) => (c === ' ' ? 'Leertaste' : c === '\n' ? 'Enter' : c);
+  const $btn = h('button', {
+    class: 'primary',
+    onclick: async () => {
+      $btn.disabled = true;
+      try {
+        const t = await api('POST', '/api/me/practice');
+        us.set('text:' + t.id, t);
+        navigate('/t/' + t.id);
+      } catch (err) {
+        $btn.disabled = false;
+        fail(`Übungstext konnte nicht erstellt werden: ${err.message}`);
+      }
+    },
+  }, 'Übungstext für diese Tasten erstellen');
+  fill($el,
+    h('p', { class: 'muted' }, `Die Tasten mit der höchsten Fehlerquote in den letzten ${data.days} Tagen:`),
+    h('table', { class: 'weak' }, h('tbody', {}, data.keys.map((k) => h('tr', {},
+      h('td', {}, h('span', { class: 'keycap' }, label(k.char))),
+      h('td', { class: 'num' }, `${Math.round(k.rate * 100)} %`),
+      h('td', { class: 'muted' }, `${k.errors} Fehler bei ${k.attempts} Versuchen`),
+      h('td', { class: 'muted' }, locate(k.char, layout) ? hint(k.char, layout) : ''),
+    )))),
+    $btn,
+  );
 }
 
 async function loadResults($el, resultsReq) {

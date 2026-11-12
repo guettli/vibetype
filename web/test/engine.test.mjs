@@ -31,9 +31,10 @@ test('stop on error, finish, stats', () => {
   assert.equal(press(s, text, 'c', t0 + 61000), 'ignored');
   assert.equal(cpm(s, t0 + 999999), 4); // 4 chars in 1 minute
   assert.equal(accuracy(s), 80);
+  assert.deepEqual(s.keyErrors, { b: 1 }); // the x was typed while "b" was due
   assert.deepEqual(syncPayload(s, t0), {
     text_id: 'tid', cursor_pos: 4, error_count: 1, cpm: 4,
-    started_at: '2026-01-01T00:00:00.000Z', finished_at: '2026-01-01T00:01:00.000Z',
+    started_at: '2026-01-01T00:00:00.000Z', finished_at: '2026-01-01T00:01:00.000Z', key_errors: { b: 1 },
   });
 });
 
