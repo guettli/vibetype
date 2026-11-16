@@ -118,11 +118,14 @@ Docker: `docker build -t vibetype . && docker run -p 8080:8080 -v vibetype:/data
 ## Release & Deployment
 
 * Jeder grüne CI-Lauf auf `main` erzeugt per [release.yml](.github/workflows/release.yml) den nächsten Tag
-  `v0.0.N` und das Image `ghcr.io/guettli/vibetype:v0.0.N`.
-* Produktiv läuft vibetype auf dem vps-Cluster, die Manifeste liegen in
-  [guettli/gitops](https://github.com/guettli/gitops) unter `k8s/plain/vps/vibetype/`. Renovate erhöht dort den
-  Image-Tag, Flux rollt aus. Es läuft ein einzelnes Replica mit `strategy: Recreate`, weil die SQLite-Datei auf einem
-  RWO-Volume liegt.
+  `v0.0.N`, das Image `ghcr.io/guettli/vibetype:v0.0.N` und setzt den Branch `deploy` auf dieses Release.
+* Produktiv läuft vibetype auf einem k3s-Cluster. Flux holt die Manifeste direkt aus diesem Repository
+  ([deploy/](deploy/README.md), Branch `deploy`) und rollt sie aus, meist innerhalb von 1–2 Minuten nach dem Release.
+  Es gibt keinen Umweg über ein separates GitOps-Repository und keinen Renovate-PR mehr.
+* Das Repository ist öffentlich, deshalb liegen in `deploy/` nur Deployment, Service und Traefik-Routen, keine
+  Secrets. Die CI prüft das. Flux wendet sie mit einem Service-Account an, der nur diese Arten im Namespace
+  `vibetype` verwalten darf. Namespace, Datenbank-Volume, TLS-Zertifikat und DNS werden außerhalb verwaltet.
+* Es läuft ein einzelnes Replica mit `strategy: Recreate`, weil die SQLite-Datei auf einem RWO-Volume liegt.
 
 ## Tests
 

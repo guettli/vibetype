@@ -1,0 +1,39 @@
+# Traefik routes. The TLS certificate (Secret vibetype-tls) is issued by
+# cert-manager and managed outside this repository.
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: vibetype-https
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - kind: Rule
+      match: Host(`vibetype.thomas-guettler.de`)
+      middlewares:
+        - name: hsts
+      services:
+        - name: vibetype
+          port: 8080
+  tls:
+    secretName: vibetype-tls
+---
+# Redirect plain HTTP to HTTPS, except the ACME HTTP-01 challenge path:
+# cert-manager's temporary solver uses the same entrypoint, and Traefik ranks
+# routers by rule length, so a longer redirect rule would answer the challenge
+# with a redirect and silently block certificate renewal.
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: vibetype-http
+spec:
+  entryPoints:
+    - web
+  routes:
+    - kind: Rule
+      match: Host(`vibetype.thomas-guettler.de`) && !PathPrefix(`/.well-known/acme-challenge/`)
+      middlewares:
+        - name: redirect-to-https
+      services:
+        - name: vibetype
+          port: 8080
