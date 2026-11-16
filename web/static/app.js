@@ -280,7 +280,7 @@ function renderUser() {
 
 function loginView() {
   const name = h('input', { type: 'text', placeholder: 'Dein Name, z. B. Thomas', maxlength: 64, required: true, autocomplete: 'nickname' });
-  const msg = h('p', { class: 'bad' });
+  const msg = h('p', { class: 'bad', role: 'alert' });
   const run = (fn) => async (e) => {
     e.preventDefault();
     msg.textContent = '';
@@ -291,9 +291,12 @@ function loginView() {
   const register = h('form', { class: 'register', hidden: true, onsubmit: run(() => registerPasskey(name.value)) },
     h('label', {}, 'Wie sollen dich andere sehen?', name),
     h('button', { class: 'primary' }, 'Passkey erstellen'),
-    h('p', { class: 'muted' }, 'Dein Gerät legt einen Passkey an (Fingerabdruck, Gesicht oder PIN). Ein Passwort oder eine E-Mail brauchst du nicht.'));
+    h('p', { class: 'muted' }, 'Dein Gerät legt einen Passkey an (Fingerabdruck, Gesicht oder PIN). Ein Passwort oder eine E-Mail brauchst du nicht.'),
+    h('button', { type: 'button', class: 'link', onclick: () => { register.hidden = true; choices.hidden = false; msg.textContent = ''; newBtn.focus(); } },
+      'Zurück: Ich habe schon einen Passkey'));
+  const newBtn = h('button', { class: 'primary big', onclick: () => { choices.hidden = true; register.hidden = false; msg.textContent = ''; name.focus(); } }, 'Neu hier?');
   const choices = h('div', { class: 'choices' },
-    h('button', { class: 'primary big', onclick: () => { choices.hidden = true; register.hidden = false; name.focus(); } }, 'Neu hier?'),
+    newBtn,
     h('button', { class: 'big', onclick: run(loginPasskey) }, 'Erneut anmelden'));
   return h('section', { class: 'card narrow' },
     h('h2', {}, 'Willkommen bei vibetype'),

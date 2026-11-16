@@ -18,6 +18,9 @@ async function newUser(name) {
   const { authenticatorId } = await cdp.send('WebAuthn.addVirtualAuthenticator', authOptions);
   await page.goto(BASE + '/');
   await page.click('text=Neu hier?');
+  await page.click('text=Zurück: Ich habe schon einen Passkey'); // back and forth works
+  await page.waitForSelector('text=Erneut anmelden');
+  await page.click('text=Neu hier?');
   await page.fill('input[placeholder^="Dein Name"]', name);
   await page.click('text=Passkey erstellen');
   try { await page.waitForSelector(`#user:has-text("${name}")`, { timeout: 8000 }); }

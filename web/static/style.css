@@ -168,3 +168,4 @@ figure.chart text { fill: var(--muted); font-size: 11px; font-family: system-ui,
 .register label { display: block; margin-top: 16px; }
 .register label input { margin-top: 4px; }
 .register button { width: 100%; }
+.register button.link { width: auto; padding: 0; font-size: inherit; flex: none; }
