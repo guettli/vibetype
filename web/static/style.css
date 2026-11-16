@@ -1,7 +1,7 @@
 :root {
   --bg: #f6f5f2; --card: #fff; --fg: #1d1d1b; --muted: #77756f; --line: #e2e0da;
   --accent: #2f6fdb; --ok: #2e8b57; --bad: #c62828; --warn: #b26a00;
-  --done: #9a9890; --cur-bg: #dbe7fb;
+  --done: #9a9890; --cur-bg: #dbe7fb; --on-accent: #fff;
   --mono: ui-monospace, "SF Mono", "Cascadia Mono", "JetBrains Mono", Menlo, Consolas, monospace;
   color-scheme: light dark;
 }
@@ -9,7 +9,7 @@
   :root {
     --bg: #18181a; --card: #222225; --fg: #ececea; --muted: #9a9890; --line: #36363a;
     --accent: #7aa7ff; --ok: #6cc08b; --bad: #ff6b6b; --warn: #f0a940;
-    --done: #6d6c68; --cur-bg: #2c3d5c;
+    --done: #6d6c68; --cur-bg: #2c3d5c; --on-accent: #0d1626; /* white on the light dark-mode blue is too faint */
   }
 }
 * { box-sizing: border-box; }
@@ -27,11 +27,12 @@ hr { border: 0; border-top: 1px solid var(--line); margin: 20px 0; }
 input, textarea { width: 100%; font: inherit; padding: 8px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg); margin-bottom: 8px; }
 textarea { font-family: var(--mono); resize: vertical; }
 button { font: inherit; padding: 8px 14px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); cursor: pointer; }
-button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
 button.link { border: 0; padding: 0; background: none; color: var(--accent); text-decoration: underline; }
 a { color: var(--accent); }
 .row { display: flex; gap: 8px; }
 .row input { margin: 0; }
+.row button, .choices button { white-space: nowrap; }
 .muted { color: var(--muted); }
 .bad { color: var(--bad); }
 .warn { color: var(--warn); }
@@ -160,3 +161,11 @@ figure.chart .grid { stroke: var(--line); stroke-width: 1; }
 figure.chart .line { fill: none; stroke: var(--accent); stroke-width: 2; stroke-linejoin: round; }
 figure.chart circle { fill: var(--accent); }
 figure.chart text { fill: var(--muted); font-size: 11px; font-family: system-ui, sans-serif; }
+
+/* login */
+.choices { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 16px; }
+.choices button.big, .register button { flex: 1; padding: 14px 18px; font-size: 18px; }
+.register label { display: block; margin-top: 16px; }
+.register label input { margin-top: 4px; }
+.register button { width: 100%; }
+.register button.link { width: auto; padding: 0; font-size: inherit; flex: none; }

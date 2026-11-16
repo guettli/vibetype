@@ -17,6 +17,10 @@ async function newUser(name) {
     isUserVerified: true, automaticPresenceSimulation: true } };
   const { authenticatorId } = await cdp.send('WebAuthn.addVirtualAuthenticator', authOptions);
   await page.goto(BASE + '/');
+  await page.click('text=Neu hier?');
+  await page.click('text=Zurück: Ich habe schon einen Passkey'); // back and forth works
+  await page.waitForSelector('text=Erneut anmelden');
+  await page.click('text=Neu hier?');
   await page.fill('input[placeholder^="Dein Name"]', name);
   await page.click('text=Passkey erstellen');
   try { await page.waitForSelector(`#user:has-text("${name}")`, { timeout: 8000 }); }
@@ -35,8 +39,8 @@ await A.page.waitForSelector('text=Noch tippt niemand');
 step(`text created ${slug}, live view empty`);
 
 await A.page.click('text=abmelden');
-await A.page.waitForSelector('text=Mit Passkey anmelden');
-await A.page.click('text=Mit Passkey anmelden');
+await A.page.waitForSelector('text=Erneut anmelden');
+await A.page.click('text=Erneut anmelden');
 await A.page.waitForSelector('#user:has-text("Alice")');
 step('Alice logout + passkey login (discoverable)');
 
@@ -52,7 +56,7 @@ await A.page.fill('input[aria-label="Bezeichnung des neuen Passkeys"]', 'Zweitge
 await A.page.click('text=Passkey hinzufügen');
 await A.page.waitForSelector('ul.passkeys li:has-text("Zweitgerät")');
 await A.page.click('text=abmelden');
-await A.page.click('text=Mit Passkey anmelden');
+await A.page.click('text=Erneut anmelden');
 await A.page.waitForSelector('#user:has-text("Alice B.")');
 await A.page.click('#user a');
 A.page.once('dialog', (d) => d.accept());
@@ -60,6 +64,25 @@ await A.page.click('ul.passkeys li:has-text("Passkey vom") >> text=löschen');
 await A.page.waitForSelector('ul.passkeys li:has-text("Passkey vom")', { state: 'detached' });
 if (await A.page.$('ul.passkeys button')) throw new Error('the last passkey must not be deletable');
 step('account: renamed, second passkey added and used to log in, first one deleted');
+
+// a due line break shows ↵ at the end of the line, the next line starts on its own line
+await A.page.goto(BASE + '/t/lek02');
+await A.page.waitForSelector('.typing');
+const lesson2Line1 = await A.page.evaluate(() => fetch('/api/texts/lek02').then((r) => r.json()).then((t) => t.content.split('\n')[0]));
+await A.page.evaluate((line) => {
+  for (const ch of line) document.dispatchEvent(new KeyboardEvent('keydown', { key: ch, bubbles: true, cancelable: true }));
+}, lesson2Line1);
+const geo = await A.page.evaluate(() => {
+  const cur = document.querySelector('.typing .cur');
+  const rest = document.querySelector('.typing .rest');
+  const r = document.createRange();
+  r.setStart(rest.firstChild, 1); // after the line break that starts the rest
+  r.setEnd(rest.firstChild, 2);
+  const c = cur.getBoundingClientRect(), n = r.getBoundingClientRect(), box = document.querySelector('.typing').getBoundingClientRect();
+  return { cur: cur.textContent, curTop: c.top, curHeight: c.height, nextTop: n.top, nextLeft: n.left - box.left };
+});
+if (geo.cur !== '↵' || geo.nextTop < geo.curTop + geo.curHeight / 2 || geo.nextLeft > 40) throw new Error('line break rendering: ' + JSON.stringify(geo));
+step('due line break: ↵ at the line end, next line starts left (' + JSON.stringify(geo) + ')');
 
 // built-in lessons: list, type lesson 1 completely, summary links to lesson 2, home shows ✓
 await A.page.goto(BASE + '/');
@@ -189,7 +212,7 @@ step('home shows result: ' + resultRow);
 
 // logout wipes the user's offline data (shared classroom PCs)
 await B.page.click('text=abmelden');
-await B.page.waitForSelector('text=Mit Passkey anmelden');
+await B.page.waitForSelector('text=Erneut anmelden');
 const leftover = await B.page.evaluate(() => Object.keys(localStorage).filter((k) => k.startsWith('vt:u:')));
 if (leftover.length) throw new Error('user data left after logout: ' + leftover);
 step('logout clears user-scoped localStorage');
@@ -203,7 +226,7 @@ await A.page.waitForSelector('#status:has-text("cannot be typed")');
 step('emoji text rejected: ' + await A.page.$eval('#status', (e) => e.innerText));
 
 // Bob types offline, the creator deletes the text meanwhile -> Bob gets a clear message on reconnect
-await B.page.click('text=Mit Passkey anmelden');
+await B.page.click('text=Erneut anmelden');
 await B.page.waitForSelector('#user:has-text("Bob")');
 await B.page.goto(`${BASE}/t/${slug}`);
 await B.page.waitForSelector('.typing');
