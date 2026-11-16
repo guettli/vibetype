@@ -1,0 +1,83 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vibetype
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vibetype
+  # Recreate, not RollingUpdate: the database is a single SQLite file on a
+  # ReadWriteOnce volume, and two pods writing it concurrently is exactly the
+  # thing SQLite cannot do. A few seconds of downtime per deploy is fine: the
+  # typing runs in the browser and the client queues its progress offline
+  # (502/503/504 from the reverse proxy count as "offline" in the app).
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: vibetype
+    spec:
+      containers:
+        - name: vibetype
+          image: ghcr.io/guettli/vibetype
+          args:
+            - -addr
+            - 0.0.0.0:8080
+            - -db
+            - /data/vibetype.db
+            # Passkeys are bound to the rpId derived from this origin's host.
+            # It must match the host the app is served from, or the
+            # authenticator refuses with a SecurityError that never reaches the
+            # server log. Changing it later invalidates every passkey. The
+            # server also rejects every non-GET request whose Origin header is
+            # not exactly this value (CSRF protection).
+            - -origin
+            - https://vibetype.thomas-guettler.de
+          ports:
+            - containerPort: 8080
+              name: http
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          resources:
+            limits:
+              memory: 256Mi
+            requests:
+              cpu: 20m
+              memory: 64Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - mountPath: /data
+              name: data
+            # Read-only root filesystem: SQLite needs somewhere for temp files.
+            - mountPath: /tmp
+              name: tmp
+      securityContext:
+        # The image runs as uid 65532 (distroless nonroot). fsGroup makes the
+        # volume writable for it; without it the server cannot create its
+        # SQLite file and crash-loops on startup.
+        fsGroup: 65532
+        runAsGroup: 65532
+        runAsNonRoot: true
+        runAsUser: 65532
+      volumes:
+        # The PersistentVolumeClaim is managed outside this repository, so the
+        # data survives anything that happens to these manifests.
+        - name: data
+          persistentVolumeClaim:
+            claimName: vibetype-data
+        - name: tmp
+          emptyDir: {}

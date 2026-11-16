@@ -1,0 +1,15 @@
+# Production manifests of vibetype.thomas-guettler.de, applied by Flux straight
+# from this repository (see deploy/README.md). This repository is public: never
+# put a Secret or anything confidential here. CI rejects kind: Secret.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - deployment.yaml
+  - service.yaml
+  - ingressroute.yaml
+  - middleware.yaml
+images:
+  - name: ghcr.io/guettli/vibetype
+    # On main this stays "dev". The release workflow sets the released tag on
+    # the `deploy` branch, which is what Flux follows.
+    newTag: dev

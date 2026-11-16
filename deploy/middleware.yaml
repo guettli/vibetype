@@ -1,0 +1,19 @@
+# Traefik middlewares are namespaced, so the app brings its own.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: hsts
+spec:
+  headers:
+    stsSeconds: 31536000
+    stsIncludeSubdomains: false
+    stsPreload: false
+---
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: redirect-to-https
+spec:
+  redirectScheme:
+    permanent: true
+    scheme: https

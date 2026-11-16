@@ -18,6 +18,10 @@ jobs:
       - run: go vet ./...
       - run: go test ./...
       - run: node --test web/test/*.test.mjs
+      - name: deploy manifests (public repo, applied by Flux)
+        run: |
+          go install github.com/yannh/kubeconform/cmd/kubeconform@v0.7.0
+          ./scripts/check-deploy.sh
       - name: e2e
         run: |
           go build -o vibetype .
