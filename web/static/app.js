@@ -287,14 +287,18 @@ function loginView() {
     try { me = await fn(); ls.set('me', me); renderUser(); route(); }
     catch (err) { msg.textContent = err.message; }
   };
+  // two clear choices; the name field only appears for new users
+  const register = h('form', { class: 'register', hidden: true, onsubmit: run(() => registerPasskey(name.value)) },
+    h('label', {}, 'Wie sollen dich andere sehen?', name),
+    h('button', { class: 'primary' }, 'Passkey erstellen'),
+    h('p', { class: 'muted' }, 'Dein Gerät legt einen Passkey an (Fingerabdruck, Gesicht oder PIN). Ein Passwort oder eine E-Mail brauchst du nicht.'));
+  const choices = h('div', { class: 'choices' },
+    h('button', { class: 'primary big', onclick: () => { choices.hidden = true; register.hidden = false; name.focus(); } }, 'Neu hier?'),
+    h('button', { class: 'big', onclick: run(loginPasskey) }, 'Erneut anmelden'));
   return h('section', { class: 'card narrow' },
-    h('h2', {}, 'Anmelden'),
-    h('p', {}, 'vibetype nutzt Passkeys – kein Passwort, keine E-Mail.'),
-    h('button', { class: 'primary', onclick: run(loginPasskey) }, 'Mit Passkey anmelden'),
-    h('hr'),
-    h('h3', {}, 'Neu hier?'),
-    h('form', { onsubmit: run(() => registerPasskey(name.value)) }, name, h('button', {}, 'Passkey erstellen')),
-    msg,
+    h('h2', {}, 'Willkommen bei vibetype'),
+    h('p', {}, '10-Finger-Schreiben üben, Texte teilen und sehen, wer gerade tippt.'),
+    choices, register, msg,
   );
 }
 
@@ -397,7 +401,7 @@ async function route() {
 async function homeView() {
   const title = h('input', { type: 'text', placeholder: 'Titel', maxlength: 200, required: true });
   const content = h('textarea', { rows: 8, placeholder: 'Text zum Abtippen …', required: true });
-  const code = h('input', { type: 'text', placeholder: 'Code, z. B. a7x9k2', pattern: '[a-z0-9]+', required: true, autocapitalize: 'off' });
+  const code = h('input', { type: 'text', placeholder: 'Code, z. B. a7x9k2', 'aria-label': 'Code', pattern: '[a-z0-9]+', required: true, autocapitalize: 'off' });
   const list = h('ul', { class: 'texts' }, h('li', { class: 'muted' }, 'lade …'));
   const results = h('div', {}, h('p', { class: 'muted' }, 'lade …'));
   const lessonList = h('ol', { class: 'lessons' }, h('li', { class: 'muted' }, 'lade …'));
@@ -407,31 +411,35 @@ async function homeView() {
   const resultsReq = flush().then(() => api('GET', '/api/me/results'));
   resultsReq.catch(() => {}); // handled by each consumer
 
+  const codeCard = h('section', { class: 'card' },
+    h('h2', {}, 'Code bekommen?'),
+    h('p', { class: 'muted' }, 'Hat dir jemand einen Text zum Abtippen geschickt, zum Beispiel deine Lehrerin oder dein Lehrer? Dann gib hier den Code ein. Der Link oder der QR-Code führt direkt zum Text.'),
+    h('form', { class: 'row', onsubmit: (e) => { e.preventDefault(); navigate('/t/' + code.value.trim().toLowerCase()); } },
+      code, h('button', {}, 'Text öffnen')),
+  );
+  const newTextCard = h('section', { class: 'card' },
+    h('h2', {}, 'Eigenen Text anlegen'),
+    h('p', { class: 'muted' }, 'Füge einen beliebigen Text ein. Du bekommst einen Code und einen Link zum Teilen und siehst live, wer ihn gerade tippt.'),
+    h('form', {
+      onsubmit: async (e) => {
+        e.preventDefault();
+        try {
+          const t = await api('POST', '/api/texts', { title: title.value, content: content.value });
+          us.set('text:' + t.id, t);
+          navigate('/t/' + t.id);
+        } catch (err) { fail(`Text konnte nicht gespeichert werden: ${err.message}`); }
+      },
+    }, title, content, h('button', { class: 'primary' }, 'Speichern & teilen')),
+  );
   fill($app,
-    h('section', { class: 'card' },
-      h('h2', {}, 'Text öffnen'),
-      h('form', { class: 'row', onsubmit: (e) => { e.preventDefault(); navigate('/t/' + code.value.trim().toLowerCase()); } },
-        code, h('button', {}, 'Los')),
-    ),
-    h('section', { class: 'card' },
-      h('h2', {}, 'Neuer Text'),
-      h('form', {
-        onsubmit: async (e) => {
-          e.preventDefault();
-          try {
-            const t = await api('POST', '/api/texts', { title: title.value, content: content.value });
-            us.set('text:' + t.id, t);
-            navigate('/t/' + t.id);
-          } catch (err) { fail(`Text konnte nicht gespeichert werden: ${err.message}`); }
-        },
-      }, title, content, h('button', { class: 'primary' }, 'Speichern & teilen')),
-    ),
     h('section', { class: 'card' },
       h('h2', {}, 'Lektionen'),
       h('p', { class: 'muted' }, 'Ein Kurs für die deutsche QWERTZ-Tastatur: jede Lektion führt ein paar neue Tasten ein und nutzt nur Tasten, die du schon kennst.'),
       lessonList),
     h('section', { class: 'card' }, h('h2', {}, 'Fortschritt'), progress),
     h('section', { class: 'card' }, h('h2', {}, 'Problemtasten'), weak),
+    codeCard,
+    newTextCard,
     h('section', { class: 'card' }, h('h2', {}, 'Meine Texte'), list),
     h('section', { class: 'card' }, h('h2', {}, 'Meine Ergebnisse'), results),
   );
@@ -752,11 +760,14 @@ async function typingView(textId) {
   const $live = h('div', { class: 'live' });
   const shareUrl = `${location.origin}/t/${text.id}`;
 
-  const display = (c) => (c === '\n' ? '↵\n' : c);
   function render() {
     $done.textContent = textChars.slice(0, state.cursor).join('');
-    $cur.textContent = state.cursor < textChars.length ? display(textChars[state.cursor]) : '';
-    $rest.textContent = textChars.slice(state.cursor + 1).join('');
+    // A due line break shows as ↵ at the end of the line; the break itself goes
+    // into the rest. Inside the inline-block cursor it would only make the cursor
+    // box two lines tall and the next line would continue behind it.
+    const due = state.cursor < textChars.length ? textChars[state.cursor] : '';
+    $cur.textContent = due === '\n' ? '↵' : due;
+    $rest.textContent = (due === '\n' ? '\n' : '') + textChars.slice(state.cursor + 1).join('');
     kb.show(state.cursor < textChars.length ? textChars[state.cursor] : null);
     renderStats();
     renderSummary();

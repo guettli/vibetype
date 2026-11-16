@@ -17,7 +17,7 @@ jeder Nutzer kann Texte anlegen, per Link/Code teilen und sieht live, wer seinen
   Hat ein Durchgang Anschläge ohne Zeitmessung (alter Tab, zweiter Tab auf demselben Text), zählt für ihn die
   Gesamtdauer.
 * **Stop-on-Error:** Bei einem Tippfehler bleibt der Cursor stehen und das Zeichen „wackelt“ rot, bis die richtige
-  Taste kommt.
+  Taste kommt. Ist ein Zeilenumbruch dran, steht `↵` am Zeilenende, und die nächste Zeile beginnt wie im Text links.
 * **Bildschirmtastatur mit Fingerhinweisen:** Unter dem Text zeigt eine Tastatur (QWERTZ oder QWERTY) die nächste
   Taste, die nötige Umschalt- bzw. AltGr-Taste und den Finger dafür („rechter Zeigefinger + linke Umschalttaste“). Die
   Tasten sind nach Finger eingefärbt, F und J haben die Tastmarke. Eine falsch gedrückte Taste blinkt rot, falls sie
@@ -78,6 +78,11 @@ jeder Nutzer kann Texte anlegen, per Link/Code teilen und sieht live, wer seinen
   diesem Text gelöscht (mit Rückfrage). Wer den Text noch offline im Browser hat, bekommt beim nächsten Sync den
   Hinweis, dass der Text gelöscht wurde. Seine lokalen Daten zu diesem Text werden dann verworfen.
 * **Passkeys:** Login per WebAuthn (discoverable credentials), ohne Passwort und ohne E-Mail. Sitzung per HTTP-only-Cookie.
+  Die Anmeldeseite hat zwei Knöpfe: „Neu hier?“ fragt nach dem Anzeigenamen und legt einen Passkey an, „Erneut
+  anmelden“ meldet mit einem vorhandenen Passkey an.
+* **Startseite:** Oben stehen Lektionen, Fortschritt und Problemtasten. Darunter folgt „Code bekommen?“ für Texte, die
+  jemand geteilt hat (Code eingeben; Link und QR-Code führen direkt zum Text). Danach kommen „Eigenen Text anlegen“
+  sowie die eigenen Texte und Ergebnisse.
 
 ## Stack
 
